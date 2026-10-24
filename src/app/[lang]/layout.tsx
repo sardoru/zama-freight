@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono, Manrope } from "next/font/google";
 import { notFound } from "next/navigation";
-import { themeScript } from "@/components/theme";
+import { themeScript } from "@/components/theme-script";
 import { I18nProvider } from "@/i18n/client";
 import { INTL_LOCALE, isLocale, LOCALES, OG_LOCALE } from "@/i18n/config";
 import { getDict } from "@/i18n/get-dict";
