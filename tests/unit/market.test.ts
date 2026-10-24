@@ -2,11 +2,13 @@
 // and background-tab runs of #8, the bids and ids of #26, and the saved-state
 // checks of #5. Math.random is seeded, so every run sees the same market.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CARRIERS, SHIPPER, VEHICLE } from "@/data/companies";
+import { CARRIER, CARRIERS, SHIPPER, VEHICLE } from "@/data/companies";
 import { route } from "@/data/network";
 import { PLACES } from "@/data/places";
 import { fitsReturn } from "@/data/seed";
 import type { Load } from "@/data/types";
+import { runVerdict } from "@/lib/cabotage";
+import { jobScope, zbeProblem } from "@/lib/checks";
 import { quote } from "@/lib/pricing";
 
 const START = Date.UTC(2026, 9, 24, 8, 0, 0); // 10:00 in Madrid
@@ -250,6 +252,145 @@ describe("the simulated market stays alive (#8) with bounded bids and fresh ids 
     // The market clock travels with the save, so a reload carries on where you left off.
     expect(saved.clock).toMatchObject({ speed: 20 });
     expect(saved.clock.sim).toBeGreaterThan(saved.clock.real);
+  });
+});
+
+/**
+ * What the screens would mark as not allowed: a pending bid whose truck may not run the load at the pickup it offers
+ * (the bid's rule chip), and a booked or assigned job whose truck may not run it (Dispatch's rule and ZBE alerts).
+ */
+function notAllowed(s: State): string[] {
+  const ctx = { anchor: s.anchor, past: s.ledger };
+  const byId = new Map(s.loads.map((l) => [l.id, l]));
+  const out: string[] = [];
+  for (const b of s.bids) {
+    const l = byId.get(b.loadId);
+    const v = VEHICLE.get(b.vehicleId);
+    if (b.status !== "pending" || !l || !v) continue;
+    if (!runVerdict({ ...l, pickupAt: b.pickupEta }, v, s.loads, ctx).ok) out.push(`bid ${b.id}: ${v.id} on ${l.id} ${l.from}→${l.to}`);
+  }
+  for (const l of s.loads) {
+    const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+    if (!v || (l.status !== "booked" && l.status !== "assigned")) continue;
+    if (!runVerdict(l, v, s.loads, ctx).ok || zbeProblem(l, v, l.departedAt ?? l.pickupAt)) out.push(`${l.status} ${l.id}: ${v.id} ${l.from}→${l.to}`);
+  }
+  return out;
+}
+
+const isCabotageFor = (l: Pick<Load, "from" | "to" | "vehicleId">) => {
+  const c = CARRIER.get(VEHICLE.get(l.vehicleId ?? "")?.carrierId ?? "");
+  return !!c && jobScope(l, c.country) === "cabotage";
+};
+
+/**
+ * Runs the market like drive() and checks the rules after every tick: nothing the screens would mark as not allowed,
+ * and every truck that leaves may run its job at the moment it leaves. Keeps every load that was ever delivered, so
+ * at the end each cabotage operation can be judged against the vehicle's whole history, not just what the board
+ * still shows.
+ */
+function driveLegal(useMarket: Store, hours: number, every: number) {
+  const seenMoving = new Set<string>();
+  const delivered = new Map<string, Load>();
+  const problems: string[] = [];
+  let cabotageBids = 0;
+  const bidsSeen = new Set<string>();
+  const anchor = useMarket.getState().anchor;
+  const steps = (hours * HOUR) / every;
+  let maxLedger = 0;
+  for (let i = 0; i <= steps; i++) {
+    if (i) {
+      vi.advanceTimersByTime(every);
+      useMarket.getState().tick();
+    }
+    const s = useMarket.getState();
+    expect(s.anchor, "the market day never re-opened").toBe(anchor);
+    for (const p of notAllowed(s)) problems.push(`${i * every} ms: ${p}`);
+    const byId = new Map(s.loads.map((l) => [l.id, l]));
+    for (const b of s.bids) {
+      if (bidsSeen.has(b.id)) continue;
+      bidsSeen.add(b.id);
+      const l = byId.get(b.loadId);
+      if (b.status === "pending" && l && isCabotageFor({ ...l, vehicleId: b.vehicleId })) cabotageBids++;
+    }
+    for (const l of s.loads) {
+      if (l.status === "inTransit" && !seenMoving.has(l.id)) {
+        seenMoving.add(l.id);
+        const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+        if (v && !runVerdict(l, v, s.loads, { anchor: s.anchor, past: s.ledger }).ok) problems.push(`${i * every} ms: ${l.id} left on ${v.id} though not allowed`);
+      }
+      if (l.status === "delivered") delivered.set(l.id, l);
+    }
+    maxLedger = Math.max(maxLedger, s.ledger.length);
+  }
+  // Every cabotage operation, judged with everything its vehicle ever did (the board prunes old loads; the ledger must not forget them).
+  const s = useMarket.getState();
+  const all = [...delivered.values(), ...s.loads.filter((l) => !delivered.has(l.id))];
+  const cabotage = [...delivered.values()].filter(isCabotageFor);
+  const unfair = cabotage.filter((l) => !runVerdict(l, VEHICLE.get(l.vehicleId!)!, all, { anchor }).ok).map((l) => `${l.id} on ${l.vehicleId}`);
+  // Operations per vehicle and host country, for the report.
+  const perVehicle: Record<string, number> = {};
+  for (const l of cabotage) perVehicle[`${l.vehicleId}@${PLACES[l.from].country}`] = (perVehicle[`${l.vehicleId}@${PLACES[l.from].country}`] ?? 0) + 1;
+  return { problems, unfair, cabotageBids, cabotageRun: cabotage.length, perVehicle, delivered: delivered.size, maxLedger, ledger: s.ledger.length };
+}
+
+describe("the simulated market keeps the per-vehicle rules (licence, tachograph, cabotage, ZBE)", () => {
+  it("8 hours at ×20: no bid or booking the screens would mark as not allowed, at any tick", { timeout: 300_000 }, async () => {
+    storage();
+    const { useMarket } = await open();
+    const r = driveLegal(useMarket, 8, 1000);
+    console.info("rules, 8 h at ×20:", JSON.stringify({ ...r, problems: r.problems.slice(0, 5), unfair: r.unfair.slice(0, 5), problemCount: r.problems.length, unfairCount: r.unfair.length }));
+    expect(r.problems).toEqual([]);
+    expect(r.unfair).toEqual([]);
+    // The rules were exercised, not dodged: carriers did bid and run cabotage.
+    expect(r.cabotageBids).toBeGreaterThanOrEqual(5);
+    expect(r.cabotageRun).toBeGreaterThanOrEqual(5);
+    // The ledger of pruned jobs stays small.
+    expect(r.maxLedger).toBeLessThan(300);
+  });
+
+  it("2 hours at ×20 in a background tab: the same, ticking once a minute", { timeout: 120_000 }, async () => {
+    storage();
+    const { useMarket, setVisible } = await open();
+    setVisible(false);
+    const r = driveLegal(useMarket, 2, MIN);
+    console.info("rules, 2 h at ×20, one tick a minute:", JSON.stringify({ ...r, problems: r.problems.slice(0, 5), unfair: r.unfair.slice(0, 5) }));
+    expect(r.problems).toEqual([]);
+    expect(r.unfair).toEqual([]);
+  });
+
+  it("anchors the cabotage history when the market opens, and again on a reset or a fresh day", async () => {
+    storage();
+    const { useMarket, setVisible } = await open();
+    let s = useMarket.getState();
+    expect(s.anchor).toBe(START);
+    expect(s.ledger).toEqual([]);
+    // A fresh day after a long sleep starts its own history.
+    setVisible(false);
+    vi.advanceTimersByTime(3 * HOUR);
+    setVisible(true);
+    s = useMarket.getState();
+    expect(s.anchor).toBe(simNow(s));
+    expect(s.ledger).toEqual([]);
+    expect(notAllowed(s)).toEqual([]);
+    // A reset moves the clock back to the wall clock: the history is anchored there.
+    s.reset();
+    s = useMarket.getState();
+    expect(s.anchor).toBe(Date.now());
+    expect(notAllowed(s)).toEqual([]);
+  });
+
+  it("books an instant load on a carrier and truck the rules allow", async () => {
+    storage();
+    const { useMarket } = await open();
+    const s = useMarket.getState();
+    s.setRole("shipper");
+    // Cabotage in Spain: only trucks with an open window may take it (and the French or Lithuanian carriers' ones in a cooling-off may not).
+    const l = s.postLoad({ from: "pasaia", to: "irun", goods: "food", pallets: 20, kg: 9_000, vehicle: "artic", pickupAt: simNow(s) + 3 * HOUR, mode: "instant" });
+    useMarket.getState().bookInstant(l.id);
+    const booked = useMarket.getState().loads.find((x) => x.id === l.id)!;
+    expect(booked.status).toBe("booked");
+    expect(booked.vehicleId).toBeDefined();
+    expect(notAllowed(useMarket.getState())).toEqual([]);
   });
 });
 

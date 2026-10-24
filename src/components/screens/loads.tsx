@@ -219,7 +219,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
     : [];
   const price = l.price ?? l.target;
   // Someone must be able to run it legally before the instant price can be booked.
-  const bookable = !open || eligibleCarriers(l, { loads: rules.loads, at: l.pickupAt, anchor: rules.anchor }).length > 0;
+  const bookable = !open || eligibleCarriers(l, { ...rules, at: l.pickupAt }).length > 0;
 
   return (
     <div className="space-y-5 p-4">

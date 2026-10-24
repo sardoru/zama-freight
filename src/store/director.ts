@@ -4,14 +4,17 @@
 // of at most STEP, so a background tab that the browser throttles to one tick
 // a minute sees the same market as a foreground tab ticking every second.
 // Trucks follow the market's rules: one job at a time, a return trip holds its
-// truck, the right type and payload, and the cabotage limits.
-import { ME, SHIPPERS, VEHICLE, VEHICLES } from "@/data/companies";
+// truck, the right type and payload, and the rules the screens check for each
+// vehicle (licence, tachograph, its cabotage ledger, the Donostia ZBE), so the
+// simulated market never makes a bid or a booking the screens call not allowed.
+import { CARRIER, ME, SHIPPERS, VEHICLE, VEHICLES } from "@/data/companies";
 import { route } from "@/data/network";
 import { PLACE_IDS, type PlaceId } from "@/data/places";
 import { canCarry, driveMs, eligibleCarriers, fitsReturn, HOUR, loadDocks, MIN, newId, regularDocks, vehicleFor } from "@/data/seed";
-import type { Bid, Carrier, DockAppt, FeedEvent, Load, ReturnTrip, Shipper, Vehicle, VehicleType } from "@/data/types";
+import type { Bid, Carrier, Country, DockAppt, FeedEvent, Load, ReturnTrip, Shipper, Vehicle, VehicleType } from "@/data/types";
 import { WAREHOUSES } from "@/data/warehouses";
-import { CABOTAGE_LIMIT, cabotageUsed, isCabotage } from "@/lib/checks";
+import { compactPast, pastJobs, runVerdict, type PastJob } from "@/lib/cabotage";
+import { jobScope, zbeProblem } from "@/lib/checks";
 import { quote, VEHICLE_SPECS } from "@/lib/pricing";
 import type { rng } from "@/lib/random";
 
@@ -78,11 +81,61 @@ export const ev = (kind: FeedEvent["kind"], vars: FeedEvent["vars"], at: number,
   loadId,
 });
 
-/** What decides which trucks are free: the loads, the return trips and the bids. */
+/**
+ * What decides which trucks are free and what each may legally run: the loads, the return trips and the bids, and for
+ * the cabotage ledger the moment the market opened and the jobs of loads pruned since.
+ */
 export interface Bookings {
-  loads: Load[];
-  returns: ReturnTrip[];
-  bids: Bid[];
+  loads: readonly Load[];
+  returns: readonly ReturnTrip[];
+  bids: readonly Bid[];
+  /** When the market opened: the vehicles' seeded history counts back from it (lib/cabotage.ts). */
+  anchor: number;
+  /** Cross-border and cabotage jobs of loads pruned from the board; they still count for cabotage. */
+  ledger: readonly PastJob[];
+}
+
+type Job = Pick<Load, "id" | "from" | "to" | "pickupAt"> & Partial<Pick<Load, "departedAt">>;
+
+/**
+ * May this vehicle run the job, picked up at `at` (a bid's offered pickup; the load's own by default)? Exactly what the
+ * screens check: licence, tachograph and the cabotage ledger (runVerdict), and the Donostia ZBE.
+ */
+export function mayRun(l: Job, v: Vehicle, m: Pick<Bookings, "loads" | "anchor" | "ledger">, at = l.pickupAt): boolean {
+  const job = at === l.pickupAt ? l : { ...l, pickupAt: at };
+  return runVerdict(job, v, m.loads, { anchor: m.anchor, past: m.ledger }).ok && !zbeProblem(job, v, job.departedAt ?? job.pickupAt);
+}
+
+/**
+ * Whether a truck has cross-border work in hand (`cabotageOnly`: cabotage work) other than for load `except`: a job it
+ * is planned on or running, or a pending bid.
+ */
+function hasForeignWork(v: Vehicle, country: Country, m: Pick<Bookings, "loads" | "bids">, except: string, cabotageOnly: boolean): boolean {
+  const bidOn = new Set<string>();
+  for (const b of m.bids) if (b.status === "pending" && b.vehicleId === v.id && b.loadId !== except) bidOn.add(b.loadId);
+  for (const l of m.loads) {
+    if (l.id === except) continue;
+    const held = l.vehicleId === v.id && (l.status === "booked" || l.status === "assigned" || l.status === "inTransit");
+    if (!held && !bidOn.has(l.id)) continue;
+    const scope = jobScope(l, country);
+    if (scope === "cabotage" || (scope === "international" && !cabotageOnly)) return true;
+  }
+  return false;
+}
+
+/**
+ * May the director give this job (or a bid on it) to this vehicle? It must be allowed to run it (mayRun). And so that
+ * what a truck may do can't change under a job it holds, a truck with cabotage in hand takes no other cross-border
+ * work, and takes cabotage only with no other cross-border work in hand: its cabotage ledger then only changes with
+ * jobs it has finished. Your own trucks are yours to plan.
+ */
+export function mayTake(l: Job, v: Vehicle, m: Bookings, at = l.pickupAt): boolean {
+  const country = v.carrierId === ME.carrierId ? undefined : CARRIER.get(v.carrierId)?.country;
+  const scope = country ? jobScope(l, country) : "domestic";
+  if (scope === "domestic" || !country) return mayRun(l, v, m, at);
+  // Cabotage: no other cross-border work at all (checked first: it usually settles it); international: no cabotage.
+  if (scope === "cabotage") return !hasForeignWork(v, country, m, l.id, false) && mayRun(l, v, m, at);
+  return mayRun(l, v, m, at) && !hasForeignWork(v, country, m, l.id, true);
 }
 
 /** The truck a booked load was promised: its return trip's, else the one named in the accepted bid, else the one planned when it was booked. */
@@ -95,12 +148,12 @@ export function promisedVehicle(l: Pick<Load, "id" | "returnTripId" | "status" |
 }
 
 /**
- * A truck of the carrier that can take the load (type and weight) and is free for it: not on another active job and
- * not held for a return trip other than the load's own. The load's promised truck if that one is free, else rather
- * not a truck promised to another of the carrier's booked loads; undefined when none is free. `taken` holds trucks
- * already handed out elsewhere.
+ * A truck of the carrier that can take the load (type and weight), may take it under the rules (mayTake, also at
+ * `eta` when given: a bid's offered pickup) and is free for it: not on another active job and not held for a return
+ * trip other than the load's own. The load's promised truck if that one is free, else rather not a truck promised to
+ * another of the carrier's booked loads; undefined when none is free. `taken` holds trucks already handed out elsewhere.
  */
-export function freeVehicle(carrierId: string, load: Load, m: Bookings, taken?: Set<string>) {
+export function freeVehicle(carrierId: string, load: Load, m: Bookings, taken?: Set<string>, eta?: number) {
   const busy = new Set<string>(taken);
   const waiting = new Set<string>();
   for (const l of m.loads) {
@@ -109,14 +162,27 @@ export function freeVehicle(carrierId: string, load: Load, m: Bookings, taken?: 
   }
   // A return trip holds its truck while it waits for a load, and until that load has been given its truck.
   for (const r of m.returns) if (r.id !== load.returnTripId && (r.status === "open" || waiting.has(r.matchedLoadId ?? ""))) busy.add(r.vehicleId);
-  const free = VEHICLES.filter((v) => v.carrierId === carrierId && canCarry(v, load.vehicle, load.kg) && !busy.has(v.id));
+  const free = VEHICLES.filter(
+    (v) => v.carrierId === carrierId && canCarry(v, load.vehicle, load.kg) && !busy.has(v.id) && mayTake(load, v, m) && (eta === undefined || mayTake(load, v, m, eta)),
+  );
   const own = promisedVehicle(load, m);
   const others = new Set(m.loads.filter((l) => l.id !== load.id && l.status === "booked" && l.carrierId === carrierId).map((l) => promisedVehicle(l, m)));
   return free.find((v) => v.id === own) ?? free.find((v) => !others.has(v.id)) ?? free[0];
 }
 
-/** The job would be cabotage for a carrier that has used up this week's operations. */
-export const cabotageFull = (l: Pick<Load, "from" | "to">, carrierId: string, loads: Load[]) => isCabotage(l, carrierId) && cabotageUsed(carrierId, loads) >= CABOTAGE_LIMIT;
+/** The carrier's first truck that may take the load (mayTake): the one a booking or a bid names when none is free. */
+export const legalVehicle = (carrierId: string, l: Load, m: Bookings, eta?: number) =>
+  vehicleFor(carrierId, l.vehicle, l.kg, (v) => mayTake(l, v, m) && (eta === undefined || mayTake(l, v, m, eta)));
+
+/**
+ * A load booked at `t`, after its pickup time, is picked up when a truck can come (the next five minutes): its pickup
+ * and its deadline move to then, so the rules are checked for when the truck will actually run it.
+ */
+export function onTime<T extends Load>(l: T, t: number): T {
+  if (l.pickupAt >= t) return l;
+  const pickupAt = Math.ceil(t / (5 * MIN)) * 5 * MIN;
+  return { ...l, pickupAt, deliverBy: l.deliverBy + (pickupAt - l.pickupAt) };
+}
 
 /**
  * A load booked on a return trip: the trip's carrier at its discount, picked up no earlier than an hour before the
@@ -139,10 +205,23 @@ export interface World {
   seq: number;
   /** Sim time up to which regular dock traffic is scheduled. */
   docksUntil: number;
+  /** When this market day opened (the cabotage history's anchor). */
+  anchor: number;
+  /** Cross-border and cabotage jobs of loads pruned from the board. */
+  ledger: readonly PastJob[];
 }
 
-/** Who can serve a load (one call site, so carrier rules apply everywhere the director picks a carrier). */
-const carriersFor = (l: Pick<Load, "vehicle" | "kg">): Carrier[] => eligibleCarriers(l.vehicle, l.kg).filter((c) => c.id !== ME.carrierId);
+const FLEETS = new Map<string, Vehicle[]>();
+for (const v of VEHICLES) FLEETS.set(v.carrierId, [...(FLEETS.get(v.carrierId) ?? []), v]);
+
+/**
+ * Who can serve a load, picked up at `eta` too when given (a bid's offer): the other carriers that the per-vehicle
+ * rules allow (eligibleCarriers) with a truck the director may give it (legalVehicle). One call site, so the rules
+ * apply everywhere the director picks a carrier.
+ */
+function carriersFor(l: Load, m: Bookings, eta?: number): Carrier[] {
+  return eligibleCarriers(l, { loads: m.loads, at: l.pickupAt, anchor: m.anchor, past: m.ledger }).filter((c) => c.id !== ME.carrierId && !!legalVehicle(c.id, l, m, eta));
+}
 
 const OTHER_SHIPPERS = SHIPPERS.filter((s) => s.id !== ME.shipperId);
 /** Steel goes on flatbeds and the cold chain in reefers; dry goods are 40 % van, 35 % rigid and 25 % artic loads. */
@@ -166,9 +245,6 @@ function destination(from: PlaceId, rand: () => number): PlaceId {
   return opts[opts.length - 1].to;
 }
 
-const FLEETS = new Map<string, Vehicle[]>();
-for (const v of VEHICLES) FLEETS.set(v.carrierId, [...(FLEETS.get(v.carrierId) ?? []), v]);
-
 function poisson(mean: number, rand: () => number): number {
   const limit = Math.exp(-mean);
   let k = 0;
@@ -181,13 +257,16 @@ const same = <T>(a: readonly T[], b: readonly T[]) => a.length === b.length && a
 /**
  * Moves a load through what must have happened by `now`, at the times it would
  * have happened: used for your own loads after a reload or a long absence.
+ * `pick` chooses the truck a booked load gets (by default the planned one, else
+ * the carrier's first that can carry it).
  */
-export function settle(l: Load, now: number): Load {
+export function settle(l: Load, now: number, pick?: (l: Load & { carrierId: string }) => Vehicle | undefined): Load {
   let x = l;
   for (;;) {
     if (x.status === "open" && now > x.pickupAt + EXPIRE_AFTER) x = { ...x, status: "cancelled" };
     else if (x.status === "booked" && x.carrierId && x.carrierId !== ME.carrierId && now >= x.pickupAt - ASSIGN_LEAD) {
-      const v = (x.vehicleId ? VEHICLE.get(x.vehicleId) : undefined) ?? vehicleFor(x.carrierId, x.vehicle, x.kg);
+      const booked = x as Load & { carrierId: string };
+      const v = pick ? pick(booked) : ((x.vehicleId ? VEHICLE.get(x.vehicleId) : undefined) ?? vehicleFor(x.carrierId, x.vehicle, x.kg));
       if (!v) break;
       x = { ...x, status: "assigned", vehicleId: v.id, ecmr: "shipper" };
     } else if (x.status === "assigned" && now >= x.pickupAt) x = { ...x, status: "inTransit", departedAt: x.pickupAt, ecmr: "carrier" };
@@ -219,6 +298,8 @@ class Director implements Bookings {
   events: FeedEvent[] = [];
   seq: number;
   docksUntil: number;
+  readonly anchor: number;
+  ledger: readonly PastJob[];
   private docksAdded = false;
   private readonly r: ReturnType<typeof rng>;
 
@@ -232,6 +313,8 @@ class Director implements Bookings {
     this.docks = [...w.docks];
     this.seq = w.seq;
     this.docksUntil = w.docksUntil;
+    this.anchor = w.anchor;
+    this.ledger = w.ledger;
     this.r = {
       next: rand,
       int: (min, max) => Math.floor(rand() * (max - min + 1)) + min,
@@ -273,6 +356,8 @@ class Director implements Bookings {
         feed: same(feed, w.feed) ? w.feed : feed,
         seq: this.seq,
         docksUntil: this.docksUntil,
+        anchor: w.anchor,
+        ledger: this.ledger,
       },
       events: this.events,
     };
@@ -286,7 +371,8 @@ class Director implements Bookings {
    * Whether a carrier has a truck for a load picked up at `start`: fewer of its
    * jobs and waiting return trips overlap that run than it has vehicles able to
    * carry the load. A job holds its truck from assignment to delivery. Carriers
-   * don't take on work they can't move.
+   * don't take on work they can't move. (Which truck may legally take it is
+   * checked when one is picked: carriersFor, freeVehicle, legalVehicle.)
    */
   private hasRoom(carrierId: string, l: Pick<Load, "vehicle" | "kg" | "from" | "to">, start: number, now: number): boolean {
     const fleet = (FLEETS.get(carrierId) ?? []).filter((v) => canCarry(v, l.vehicle, l.kg));
@@ -307,11 +393,17 @@ class Director implements Bookings {
     return true;
   }
 
-  /** A carrier for the load among those with a truck for it (and cabotage left), starting at a random one. */
+  /** A carrier for the load among those with a truck that may take it and room for it, starting at a random one. */
   private carrierWithRoom(l: Load, start: number, now: number): Carrier | undefined {
-    const pool = carriersFor(l);
+    const pool = carriersFor(l, this);
     const first = Math.floor(this.rand() * pool.length);
-    return pool.map((_, k) => pool[(first + k) % pool.length]).find((c) => !cabotageFull(l, c.id, this.loads) && this.hasRoom(c.id, l, start, now));
+    return pool.map((_, k) => pool[(first + k) % pool.length]).find((c) => this.hasRoom(c.id, l, start, now));
+  }
+
+  /** The truck on this load may run it, as the screens check it. */
+  private allowed(l: Load): boolean {
+    const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+    return !v || mayRun(l, v, this);
   }
 
   private bidsByLoad(): Map<string, Bid[]> {
@@ -339,19 +431,37 @@ class Director implements Bookings {
     const driving = this.driving();
     for (let i = 0; i < this.loads.length; i++) {
       const l = this.loads[i];
+      if (l.status === "assigned" && l.carrierId && l.carrierId !== ME.carrierId && l.vehicleId && !this.allowed(l)) {
+        // The rules no longer let its truck run it (after something you did): another free truck that may, or it
+        // goes back to waiting for one.
+        const v = freeVehicle(l.carrierId, { ...l, status: "booked", vehicleId: undefined }, this);
+        this.loads[i] = v ? { ...l, vehicleId: v.id } : { ...l, status: "booked", vehicleId: undefined, ecmr: "draft" };
+        continue;
+      }
       if (l.status === "assigned" && l.pickupAt <= t1) {
         // A truck still on another job (only after a restore) leaves once that one is delivered.
         if (l.vehicleId && driving.has(l.vehicleId)) continue;
         const at = Math.max(l.pickupAt, t0);
+        const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+        if (v && l.carrierId !== ME.carrierId && at > l.pickupAt && !mayRun({ ...l, departedAt: at }, v, this)) {
+          // Leaving later than planned, its truck may no longer run it (a cabotage window that has just closed):
+          // it goes back to waiting for one that may.
+          this.loads[i] = { ...l, status: "booked", vehicleId: undefined, ecmr: "draft" };
+          continue;
+        }
         this.loads[i] = { ...l, status: "inTransit", departedAt: at, ecmr: "carrier" };
         if (l.vehicleId) driving.add(l.vehicleId);
         this.events.push(ev("departed", { load: l.id, from: l.from, to: l.to }, at, l.id));
       } else if (l.status === "booked" && l.carrierId && l.carrierId !== ME.carrierId) {
         // Your own carrier's jobs wait for you to dispatch them.
         if (t1 < l.pickupAt - ASSIGN_LEAD) {
-          // Booked without a truck named (your accepted bid, a seeded booking): plan the one it was promised.
-          const planned = l.vehicleId ? undefined : (promisedVehicle(l, this) ?? vehicleFor(l.carrierId, l.vehicle, l.kg)?.id);
-          if (planned) this.loads[i] = { ...l, vehicleId: planned };
+          // Booked without a truck named (your accepted bid, a seeded booking), or with one the rules no longer allow
+          // (after something you did): plan the one it was promised if it may take it, else the first that may.
+          const current = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+          if (current && mayRun(l, current, this)) continue;
+          const promised = VEHICLE.get(promisedVehicle(l, this) ?? "");
+          const planned = promised && promised.id !== current?.id && mayTake(l, promised, this) ? promised : legalVehicle(l.carrierId, l, this);
+          if (planned?.id !== l.vehicleId) this.loads[i] = { ...l, vehicleId: planned?.id };
           continue;
         }
         // One truck per job: a truck that is free now, the promised one if possible; otherwise it waits.
@@ -409,25 +519,36 @@ class Director implements Bookings {
     this.docks = this.docks.filter((d) => !d.loadId || !gone.has(d.loadId) || d.end <= t1);
   }
 
-  /** Carriers with a truck for it (and cabotage left) bid on open loads they haven't bid on yet, more eagerly as pickup nears. */
+  /**
+   * Carriers with a truck that may take it (at the pickup they offer and at the load's own) and room for it bid on
+   * open loads they haven't bid on yet, more eagerly as pickup nears.
+   */
   private bid(t1: number, dt: number) {
     const byLoad = this.bidsByLoad();
     for (const l of this.loads) {
       if (l.status !== "open") continue;
       if (this.rand() >= chance(l.pickupAt - t1 <= ACCEPT_LEAD ? BID_RATE_URGENT : BID_RATE, dt)) continue;
       const have = byLoad.get(l.id) ?? [];
-      const pool = carriersFor(l).filter((c) => !have.some((b) => b.carrierId === c.id) && !cabotageFull(l, c.id, this.loads) && this.hasRoom(c.id, l, l.pickupAt, t1));
+      // Never a pickup that has already passed.
+      const pickupEta = Math.max(Math.ceil(t1 / Q5) * Q5, l.pickupAt + Math.round((this.rand() - 0.4) * 60) * MIN);
+      const pool = carriersFor(l, this, pickupEta).filter((c) => !have.some((b) => b.carrierId === c.id) && this.hasRoom(c.id, l, l.pickupAt, t1));
       if (!pool.length) continue;
       const c = pool[Math.floor(this.rand() * pool.length)];
-      // The bid names the truck: one that is free now if there is one, else the carrier's usual one.
-      const v = freeVehicle(c.id, l, this) ?? vehicleFor(c.id, l.vehicle, l.kg);
+      // The bid names the truck: one that is free now if there is one, else the carrier's first that may take it.
+      const v = freeVehicle(c.id, l, this, undefined, pickupEta) ?? legalVehicle(c.id, l, this, pickupEta);
       if (!v) continue;
       const amount = round5(l.target * (0.85 + this.rand() * 0.22));
-      const bid: Bid = { id: newId("b"), loadId: l.id, carrierId: c.id, vehicleId: v.id, amount, pickupEta: l.pickupAt + Math.round((this.rand() - 0.4) * 60) * MIN, at: t1, status: "pending" };
+      const bid: Bid = { id: newId("b"), loadId: l.id, carrierId: c.id, vehicleId: v.id, amount, pickupEta, at: t1, status: "pending" };
       this.bids.push(bid);
       byLoad.set(l.id, [...have, bid]);
       this.events.push(ev("bid", { carrier: c.id, amount, load: l.id }, t1, l.id));
     }
+  }
+
+  /** A pending bid a shipper may take: its truck may run the load at the pickup it offers and, unless it is yours, take it at the load's own. */
+  private usable(b: Bid, l: Load): boolean {
+    const v = VEHICLE.get(b.vehicleId);
+    return !!v && mayRun(l, v, this, b.pickupEta) && (b.mine || mayTake(l, v, this));
   }
 
   private booked(l: Load, carrierId: string, price: number, vehicleId?: string): Load {
@@ -444,11 +565,16 @@ class Director implements Bookings {
       if (l.status !== "open") continue;
       const toPickup = l.pickupAt - t1;
       const by = Math.max(l.pickupAt, t1);
+      // The load as it would be booked now (picked up now if its pickup time has passed).
+      const job = onTime(l, t1);
       const pending = (byLoad.get(l.id) ?? []).filter((b) => b.status === "pending").sort((a, b) => a.amount - b.amount);
-      // The cheapest offer from a carrier that can still move it and has cabotage left (your own trucks are yours to manage).
-      const best = l.mine || toPickup > ACCEPT_LEAD ? undefined : pending.find((b) => !cabotageFull(l, b.carrierId, this.loads) && (b.mine || this.hasRoom(b.carrierId, l, by, t1)));
+      // The cheapest offer the screens don't mark as not allowed, from a carrier that can still move it: its truck may
+      // run the load at the pickup offered, and (to be planned on the booking) at the load's own; your own trucks are
+      // yours to manage.
+      const best = l.mine || toPickup > ACCEPT_LEAD ? undefined : pending.find((b) => this.usable(b, job) && (b.mine || this.hasRoom(b.carrierId, job, by, t1)));
       if (best && ((pending.length >= 2 && toPickup <= ACCEPT_LEAD) || toPickup <= LAST_CALL)) {
-        this.loads[i] = this.booked(l, best.carrierId, best.amount, best.vehicleId);
+        this.loads[i] = this.booked(job, best.carrierId, best.amount, best.vehicleId);
+        if (job !== l) this.redock(this.loads[i]);
         decided.set(l.id, best.id);
         this.events.push(ev("booked", { load: l.id, carrier: best.carrierId, amount: best.amount }, t1, l.id, best.mine ? "won" : "booked"));
         continue;
@@ -456,10 +582,11 @@ class Director implements Bookings {
       // "The first carrier to accept takes it at this price"; a shipper with no offer it can use by the last call pays it too.
       const take = l.mode === "instant" ? this.rand() < chance(INSTANT_RATE, dt) : !l.mine && !best && toPickup <= FALLBACK;
       if (!take) continue;
-      const carrier = this.carrierWithRoom(l, by, t1);
+      const carrier = this.carrierWithRoom(job, by, t1);
       if (!carrier) continue;
-      const v = freeVehicle(carrier.id, l, this) ?? vehicleFor(carrier.id, l.vehicle, l.kg);
-      this.loads[i] = this.booked(l, carrier.id, l.target, v?.id);
+      const v = freeVehicle(carrier.id, job, this) ?? legalVehicle(carrier.id, job, this);
+      this.loads[i] = this.booked(job, carrier.id, l.target, v?.id);
+      if (job !== l) this.redock(this.loads[i]);
       decided.set(l.id, null);
       this.events.push(ev("booked", { load: l.id, carrier: carrier.id, amount: l.target }, t1, l.id));
     }
@@ -474,11 +601,13 @@ class Director implements Bookings {
       const rt = this.returns[j];
       if (rt.status !== "open" || rt.departAt <= t1) continue;
       const v = VEHICLE.get(rt.vehicleId);
-      const i = v ? this.loads.findIndex((x) => !x.mine && fitsReturn(x, rt, v.type) && !cabotageFull(x, rt.carrierId, this.loads)) : -1;
+      // The trip's own truck runs the load, at the pickup the trip gives it: it must be allowed to.
+      const i = v ? this.loads.findIndex((x) => !x.mine && fitsReturn(x, rt, v.type) && mayTake(onTime(onReturnTrip(x, rt), t1), v, this)) : -1;
       if (i < 0) continue;
       const l = this.loads[i];
-      const booked = onReturnTrip(l, rt);
+      const booked = onTime(onReturnTrip(l, rt), t1);
       this.loads[i] = rt.carrierId === ME.carrierId ? booked : { ...booked, vehicleId: rt.vehicleId };
+      if (booked.pickupAt !== l.pickupAt) this.redock(this.loads[i]);
       this.returns[j] = { ...rt, status: "matched", matchedLoadId: l.id };
       this.bids = this.bids.map((b) => (b.loadId === l.id && b.status === "pending" ? { ...b, status: "rejected" } : b));
       this.events.push(ev("return", { load: l.id, carrier: rt.carrierId, from: rt.from, to: rt.to, amount: booked.price }, t1, l.id));
@@ -575,12 +704,15 @@ class Director implements Bookings {
       .sort((a, b) => a.l.pickupAt - b.l.pickupAt);
     for (const { l, i } of due) {
       if (onRoad >= MIN_ON_ROAD) return;
+      // Leaving early must not take the job into a time the rules don't allow (a cooling-off that hasn't ended).
+      const early: Load = { ...l, pickupAt: Math.min(l.pickupAt, t1), departedAt: t1 };
       let v: Vehicle | undefined;
       if (l.status === "assigned") {
         if (l.vehicleId && driving.has(l.vehicleId)) continue;
         v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+        if (v && !mayRun(early, v, this)) continue;
       } else {
-        v = freeVehicle(l.carrierId!, l, this);
+        v = freeVehicle(l.carrierId!, early, this);
         if (!v) continue;
         this.events.push(ev("assigned", { load: l.id, plate: v.plate }, t1, l.id));
       }
@@ -595,11 +727,11 @@ class Director implements Bookings {
   /** A short-notice load booked at the instant price on a truck that is free right now. */
   private spot(at: number): boolean {
     const draft: Load = { ...this.draft(at, 0), id: "", pickupAt: at };
-    const pool = carriersFor(draft);
+    const pool = carriersFor(draft, this);
     const first = Math.floor(this.rand() * Math.max(1, pool.length));
     for (let k = 0; k < pool.length; k++) {
       const carrier = pool[(first + k) % pool.length];
-      if (cabotageFull(draft, carrier.id, this.loads) || !this.hasRoom(carrier.id, draft, at, at)) continue;
+      if (!this.hasRoom(carrier.id, draft, at, at)) continue;
       const v = freeVehicle(carrier.id, draft, this);
       if (!v) continue;
       const l: Load = {
@@ -654,6 +786,8 @@ class Director implements Bookings {
     const finished = this.loads.filter((l) => !l.mine && (l.status === "delivered" || l.status === "cancelled")).sort((a, b) => doneAt(a) - doneAt(b));
     if (finished.length <= KEEP_FINISHED) return;
     const drop = new Set(finished.slice(0, finished.length - KEEP_FINISHED).map((l) => l.id));
+    // Its cross-border or cabotage job stays in the cabotage ledger.
+    this.ledger = compactPast([...this.ledger, ...pastJobs(this.loads.filter((l) => drop.has(l.id)))], t1);
     // A pruned load takes its bids, dock slots and return trip with it, in the same update.
     this.loads = this.loads.filter((l) => !drop.has(l.id));
     this.bids = this.bids.filter((b) => !drop.has(b.loadId));

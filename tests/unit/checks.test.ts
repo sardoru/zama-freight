@@ -9,7 +9,6 @@ import { eu } from "@/i18n/dictionaries/eu";
 import { fr } from "@/i18n/dictionaries/fr";
 import { ru } from "@/i18n/dictionaries/ru";
 import {
-  cabotageUsed,
   DECA_MANDATORY,
   hasDgtLabel,
   insideZbe,
@@ -168,15 +167,6 @@ describe("job scope, cabotage and posting", () => {
     expect(needsPostingDeclaration({ from: "irun", to: "bayonne" }, "ES")).toBe(false);
     expect(needsPostingDeclaration({ from: "irun", to: "bayonne" }, "FR")).toBe(false);
     expect(jobScope({ from: "pasaia", to: "irun" }, "ES")).toBe("domestic");
-  });
-});
-
-describe("the market director's carrier-level cabotage count", () => {
-  it("adds booked cabotage jobs to the starting figures", () => {
-    const booked = { from: "biarritz", to: "bayonne", carrierId: "c-txingudi", status: "booked" } as const;
-    expect(cabotageUsed("c-txingudi", [booked])).toBe(1);
-    expect(cabotageUsed("c-baltic", [])).toBe(2);
-    expect(cabotageUsed("c-txingudi", [{ ...booked, from: "irun" }])).toBe(0);
   });
 });
 

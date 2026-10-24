@@ -187,7 +187,7 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
   const vehicleId = picked && usable(picked) ? picked : (fleet.find((x) => usable(x.id))?.id ?? "");
   // Nothing usable because of the rules: say why.
   const reason = l.status === "booked" && !vehicleId ? (fleet.map((x) => blocked.get(x.id)).find(Boolean) ?? null) : null;
-  const bookable = l.status !== "open" || eligibleCarriers(l, { loads: rules.loads, at: l.pickupAt, anchor: rules.anchor }).length > 0;
+  const bookable = l.status !== "open" || eligibleCarriers(l, { ...rules, at: l.pickupAt }).length > 0;
   const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
   const progress = l.status === "inTransit" && l.departedAt ? Math.min(1, (now - l.departedAt) / driveMs(l)) : null;
   const lane = `${place(l.from)} → ${place(l.to)}`;

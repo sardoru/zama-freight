@@ -9,12 +9,13 @@
 import { create } from "zustand";
 import { CARRIERS, ME, VEHICLE } from "@/data/companies";
 import type { PlaceId } from "@/data/places";
-import { buildBids, buildDocks, buildFeed, buildLoads, buildReturns, DOCKS_SEEDED_AHEAD, eligibleCarriers, fitsReturn, HOUR, MIN, newId } from "@/data/seed";
+import { buildBids, buildDocks, buildFeed, buildLoads, buildReturns, DOCKS_SEEDED_AHEAD, eligibleCarriers, fitsReturn, HOUR, MIN, newId, vehicleFor } from "@/data/seed";
 import type { Bid, Bin, DockAppt, FeedEvent, GoodsType, Load, ReturnTrip, Role, VehicleType, WarehouseId } from "@/data/types";
 import { applyBinPatch, buildBins, WAREHOUSE } from "@/data/warehouses";
+import type { PastJob } from "@/lib/cabotage";
 import { quote } from "@/lib/pricing";
 import type { TimePreset } from "@/lib/sun";
-import { advanceWorld, cabotageFull, ev, FIRST_WORLD_SEQ, freeVehicle, MAX_CATCH_UP, onReturnTrip, settle, worldLoadId, type World } from "./director";
+import { advanceWorld, ev, FIRST_WORLD_SEQ, freeVehicle, legalVehicle, MAX_CATCH_UP, mayRun, mayTake, onReturnTrip, onTime, settle, worldLoadId, type World } from "./director";
 import { isUserReturnId, readSaved, STORAGE_KEY, toSaved, userLoadId, userLoadNumber, yours, type SavedClock, type Yours } from "./saved";
 
 export interface MapLayers {
@@ -81,6 +82,10 @@ interface MarketState {
   userSeq: number;
   /** Sim time up to which regular dock traffic is scheduled. */
   docksUntil: number;
+  /** When this market day opened: the vehicles' cabotage history (VEHICLE_HISTORY) counts back from it. */
+  anchor: number;
+  /** Cross-border and cabotage jobs of loads pruned from the board, which still count for cabotage. */
+  ledger: readonly PastJob[];
 
   init: () => void;
   setRole: (r: Role) => void;
@@ -151,12 +156,16 @@ function saveNow(s: MarketState, force = false) {
 /** The parts of the state that end up in storage. */
 const savedParts = (s: MarketState) => [s.role, s.settings, s.clock.speed, s.userSeq, s.loads, s.bids, s.returns, s.docks, s.binPatches];
 
-/** The demo day around t0. With `seq` (a re-seed mid-session) its loads get fresh ids from the director's series. */
+/**
+ * The demo day around t0, which is when its cabotage history is anchored. With `seq` (a re-seed mid-session) its loads
+ * get fresh ids from the director's series. Its bids follow the same rules as the director's (mayTake).
+ */
 function seedWorld(t0: number, seq?: number): World {
   let n = seq ?? FIRST_WORLD_SEQ;
   const loads = buildLoads(t0, seq === undefined ? undefined : () => worldLoadId(n++));
-  const bids = buildBids(loads, t0);
-  return { loads, bids, returns: buildReturns(t0), docks: buildDocks(loads, t0), feed: buildFeed(loads, bids, t0), seq: n, docksUntil: t0 + DOCKS_SEEDED_AHEAD };
+  const returns = buildReturns(t0);
+  const bids = buildBids(loads, t0, (l, v, eta, made) => mayTake(l, v, { loads, returns, bids: made, anchor: t0, ledger: [] }, eta));
+  return { loads, bids, returns, docks: buildDocks(loads, t0), feed: buildFeed(loads, bids, t0), seq: n, docksUntil: t0 + DOCKS_SEEDED_AHEAD, anchor: t0, ledger: [] };
 }
 
 /**
@@ -165,7 +174,13 @@ function seedWorld(t0: number, seq?: number): World {
  */
 function withYours(world: World, mine: Yours, now: number): World {
   const seededIds = new Set(world.loads.map((l) => l.id));
-  const saved = mine.loads.filter((l) => !seededIds.has(l.id)).map((l) => settle(l, now));
+  const rules = { loads: [...world.loads, ...mine.loads], anchor: world.anchor, ledger: world.ledger };
+  // A booked load of yours that a carrier has since put on a truck got one the rules allow.
+  const pick = (l: Load & { carrierId: string }) => {
+    const planned = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
+    return planned && mayRun(l, planned, rules) ? planned : vehicleFor(l.carrierId, l.vehicle, l.kg, (v) => mayRun(l, v, rules));
+  };
+  const saved = mine.loads.filter((l) => !seededIds.has(l.id)).map((l) => settle(l, now, pick));
   const savedIds = new Set(saved.map((l) => l.id));
   // Your trips while open, and a seeded trip that carries one of your loads in place of its fresh, empty copy.
   const trips = mine.returns.filter((r) => (r.status === "open" ? isUserReturnId(r.id) && r.departAt > now : savedIds.has(r.matchedLoadId ?? "")));
@@ -178,7 +193,7 @@ function withYours(world: World, mine: Yours, now: number): World {
   const every = [...world.loads, ...saved];
   const seeded = world.loads.map((l): Load => {
     if (!active(l) || !taken.has(l.vehicleId as string)) return l;
-    const v = l.carrierId ? freeVehicle(l.carrierId, l, { loads: every, returns, bids: world.bids }, taken) : undefined;
+    const v = l.carrierId ? freeVehicle(l.carrierId, l, { loads: every, returns, bids: world.bids, anchor: world.anchor, ledger: world.ledger }, taken) : undefined;
     if (!v) return { ...l, status: "booked", vehicleId: undefined, departedAt: undefined, ecmr: "draft" };
     taken.add(v.id);
     return { ...l, vehicleId: v.id };
@@ -215,8 +230,18 @@ function withYours(world: World, mine: Yours, now: number): World {
   return { ...world, loads, bids, returns, docks: docks.sort((a, b) => a.start - b.start) };
 }
 
-const worldState = (w: World) => ({ loads: w.loads, bids: w.bids, returns: w.returns, docks: w.docks, feed: w.feed, worldSeq: w.seq, docksUntil: w.docksUntil });
-const worldOf = (s: MarketState): World => ({ loads: s.loads, bids: s.bids, returns: s.returns, docks: s.docks, feed: s.feed, seq: s.worldSeq, docksUntil: s.docksUntil });
+const worldState = (w: World) => ({ loads: w.loads, bids: w.bids, returns: w.returns, docks: w.docks, feed: w.feed, worldSeq: w.seq, docksUntil: w.docksUntil, anchor: w.anchor, ledger: w.ledger });
+const worldOf = (s: MarketState): World => ({
+  loads: s.loads,
+  bids: s.bids,
+  returns: s.returns,
+  docks: s.docks,
+  feed: s.feed,
+  seq: s.worldSeq,
+  docksUntil: s.docksUntil,
+  anchor: s.anchor,
+  ledger: s.ledger,
+});
 
 export const useMarket = create<MarketState>()((set, get) => ({
   ready: false,
@@ -237,6 +262,8 @@ export const useMarket = create<MarketState>()((set, get) => ({
   worldSeq: FIRST_WORLD_SEQ,
   userSeq: 1,
   docksUntil: 0,
+  anchor: 0,
+  ledger: [],
 
   init: () => {
     if (get().ready) return;
@@ -340,7 +367,8 @@ export const useMarket = create<MarketState>()((set, get) => ({
     const now = simNow(s.clock);
     set({
       bids: s.bids.map((b) => (b.loadId !== bid.loadId ? b : { ...b, status: b.id === bidId ? "accepted" : "rejected" })),
-      loads: s.loads.map((l) => (l.id === bid.loadId ? { ...l, status: "booked", carrierId: bid.carrierId, price: bid.amount, ecmr: "draft" } : l)),
+      // Booked after its pickup time, it is picked up now (onTime), and the rules are checked for then.
+      loads: s.loads.map((l) => (l.id === bid.loadId ? { ...onTime(l, now), status: "booked", carrierId: bid.carrierId, price: bid.amount, ecmr: "draft" } : l)),
       feed: [ev("booked", { load: bid.loadId, carrier: bid.carrierId, amount: bid.amount }, now, bid.loadId), ...s.feed].slice(0, 60),
     });
     get().toast("toast.accepted", { load: bid.loadId });
@@ -351,15 +379,23 @@ export const useMarket = create<MarketState>()((set, get) => ({
     const l = s.loads.find((x) => x.id === loadId);
     if (!l || l.status !== "open") return;
     const now = simNow(s.clock);
-    // As a carrier you take it yourself. Otherwise another carrier does (cabotage allowing): the best-rated one with a
-    // truck free for it, or, when every truck is out, the best-rated one, which sends the first truck back.
-    const others = eligibleCarriers(l.vehicle, l.kg)
-      .filter((c) => c.id !== ME.carrierId && !cabotageFull(l, c.id, s.loads))
+    // As a carrier you take it yourself. Otherwise another carrier does, one the rules allow (licence, tachograph and
+    // each vehicle's cabotage ledger): the best-rated one with a truck free for it, else the best-rated one with a
+    // truck that may take it, which sends that truck once it is back (planned on the booking), else the best-rated
+    // one, whose truck the market plans once one may take it.
+    const job = onTime(l, now);
+    const others = eligibleCarriers(job, { loads: s.loads, at: job.pickupAt, anchor: s.anchor, past: s.ledger })
+      .filter((c) => c.id !== ME.carrierId)
       .sort((a, b) => b.rating - a.rating);
-    const carrierId = s.role === "carrier" ? ME.carrierId : (others.find((c) => freeVehicle(c.id, l, s)) ?? others[0])?.id;
+    const pick =
+      others.map((c) => ({ c, v: freeVehicle(c.id, job, s) })).find((x) => x.v) ??
+      others.map((c) => ({ c, v: legalVehicle(c.id, job, s) })).find((x) => x.v) ??
+      (others[0] ? { c: others[0], v: undefined } : undefined);
+    const carrierId = s.role === "carrier" ? ME.carrierId : pick?.c.id;
     if (!carrierId) return;
+    const vehicleId = carrierId === ME.carrierId ? undefined : pick?.v?.id;
     set({
-      loads: s.loads.map((x) => (x.id === loadId ? { ...x, status: "booked", carrierId, price: x.target, ecmr: "draft" } : x)),
+      loads: s.loads.map((x) => (x.id === loadId ? { ...job, status: "booked", carrierId, price: x.target, ecmr: "draft", vehicleId } : x)),
       bids: s.bids.map((b) => (b.loadId === loadId && b.status === "pending" ? { ...b, status: "rejected" } : b)),
       feed: [ev("booked", { load: loadId, carrier: carrierId, amount: l.target }, now, loadId), ...s.feed].slice(0, 60),
     });
@@ -374,7 +410,7 @@ export const useMarket = create<MarketState>()((set, get) => ({
     const v = rt && VEHICLE.get(rt.vehicleId);
     // Both still open, the load fits, and the truck hasn't left yet.
     if (!l || !rt || !v || !fitsReturn(l, rt, v.type) || rt.departAt <= now) return;
-    const booked = onReturnTrip(l, rt);
+    const booked = onTime(onReturnTrip(l, rt), now);
     set({
       loads: s.loads.map((x) => (x.id === loadId ? booked : x)),
       returns: s.returns.map((r) => (r.id === returnId ? { ...r, status: "matched", matchedLoadId: loadId } : r)),

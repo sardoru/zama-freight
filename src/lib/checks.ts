@@ -35,8 +35,8 @@
 //   (Reg. 2020/1054).
 // • Posting: drivers on cabotage and cross-trade jobs count as posted and need
 //   a posting declaration (Directive 2020/1057).
-// • Cabotage itself is counted per vehicle in lib/cabotage.ts; cabotageUsed()
-//   below is the carrier-level guard the market director uses.
+// • Cabotage itself is counted per vehicle in lib/cabotage.ts, by the screens
+//   and the market director alike.
 import { CARRIER, VEHICLE } from "@/data/companies";
 import { PLACE_IDS, PLACES, type PlaceId } from "@/data/places";
 import type { Carrier, Country, Load, Vehicle } from "@/data/types";
@@ -174,22 +174,8 @@ export function needsPostingDeclaration(load: Pick<Load, "from" | "to">, carrier
   return jobScope(load, carrierCountry) === "cabotage" || isCrossTrade(load, carrierCountry);
 }
 
-/** Cabotage operations already used in the current 7-day window (the director's starting figures). */
-export const CABOTAGE_USED: Record<string, number> = { "c-baltic": 2, "c-adour": 1, "c-labourd": 0 };
+/** Cabotage operations a vehicle may run in one 7-day window (lib/cabotage.ts). */
 export const CABOTAGE_LIMIT = 3;
-
-/**
- * Carrier-level cabotage count: the starting figures plus every cabotage job
- * booked since. The market director (store) uses it as a quick guard when
- * simulated carriers bid or win; screens check each vehicle with
- * cabotageCheck() in lib/cabotage.ts, which is what the rules count.
- */
-export function cabotageUsed(carrierId: string, loads: Pick<Load, "from" | "to" | "carrierId" | "status">[]): number {
-  return (
-    (CABOTAGE_USED[carrierId] ?? 0) +
-    loads.filter((l) => l.carrierId === carrierId && l.status !== "open" && l.status !== "cancelled" && isCabotage(l, carrierId)).length
-  );
-}
 
 // ── Licences and tachographs ────────────────────────────────────────────────
 

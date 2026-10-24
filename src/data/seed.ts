@@ -1,6 +1,6 @@
 // The demo day, built relative to the moment the demo opens (t0), so trucks
 // are already on the road and pickups are always "in a few hours".
-import { cabotageCheck } from "@/lib/cabotage";
+import { cabotageCheck, type LedgerContext } from "@/lib/cabotage";
 import { licenceProblems } from "@/lib/checks";
 import { haversine } from "@/lib/geo";
 import { quote, VEHICLE_SPECS } from "@/lib/pricing";
@@ -149,12 +149,10 @@ export const canCarry = (v: Pick<Vehicle, "type">, type: VehicleType, kg = 0) =>
 /** A job to staff: its vehicle type, weight and lane, and optionally its times (for cabotage). */
 export type EligibilityJob = Pick<Load, "vehicle" | "from" | "to"> & Partial<Pick<Load, "id" | "kg" | "pickupAt" | "departedAt">>;
 
-/** The market as the cabotage ledger needs it (lib/cabotage.ts). */
-export interface EligibilityContext {
-  loads: Load[];
+/** The market as the cabotage ledger needs it (lib/cabotage.ts): its loads, the store's anchor and pruned jobs, and a time. */
+export interface EligibilityContext extends LedgerContext {
+  loads: readonly Load[];
   at: number;
-  /** The moment the demo opened (historyAnchor). */
-  anchor: number;
 }
 
 /**
@@ -179,43 +177,59 @@ export function eligibleCarriers(job: VehicleType | EligibilityJob, arg?: number
       if (!lane) return true;
       if (licenceProblems(c, v, lane, at).length) return false;
       if (!ctx) return true;
-      return !cabotageCheck({ id: lane.id ?? "job", from: lane.from, to: lane.to, pickupAt: at, departedAt: lane.departedAt }, v.id, ctx.loads, { anchor: ctx.anchor }).block;
+      return !cabotageCheck({ id: lane.id ?? "job", from: lane.from, to: lane.to, pickupAt: at, departedAt: lane.departedAt }, v.id, ctx.loads, ctx).block;
     }),
   );
 }
 
-export function vehicleFor(carrierId: string, type: VehicleType, kg = 0) {
-  return VEHICLES.find((v) => v.carrierId === carrierId && canCarry(v, type, kg));
+/** The carrier's first vehicle for a load of this type and weight; with `ok`, the first one that also passes it (the rules). */
+export function vehicleFor(carrierId: string, type: VehicleType, kg = 0, ok?: (v: Vehicle) => boolean) {
+  return VEHICLES.find((v) => v.carrierId === carrierId && canCarry(v, type, kg) && (!ok || ok(v)));
 }
 
 let bidSeq = 0;
 export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(bidSeq++).toString(36)}`;
 
-export function buildBids(loads: Load[], t0: number): Bid[] {
+/**
+ * May this vehicle bid on this load, offering to pick it up at `eta`, given the
+ * bids made so far? The store passes the market's rules (licence, tachograph,
+ * cabotage ledger, ZBE); without it only the type and weight are checked.
+ */
+export type BidCheck = (l: Load, v: Vehicle, eta: number, bids: readonly Bid[]) => boolean;
+
+export function buildBids(loads: Load[], t0: number, mayBid: BidCheck = (l, v) => canCarry(v, l.vehicle, l.kg)): Bid[] {
   const bids: Bid[] = [];
   for (const l of loads) {
     if (l.status === "cancelled") continue;
     const r = rng(hash(`bids:${l.id}`));
-    const pool = eligibleCarriers(l.vehicle, l.kg).filter((c) => c.id !== ME.carrierId || l.status !== "open");
-    const n = l.status === "open" ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
+    const open = l.status === "open";
+    // Carriers with a vehicle that may run it at its pickup time (on an open load, not you: those bids are yours to make).
+    const atPickup = (v: Vehicle) => mayBid(l, v, l.pickupAt, bids);
+    const pool = eligibleCarriers(l.vehicle, l.kg).filter((c) => (!open || c.id !== ME.carrierId) && !!vehicleFor(c.id, l.vehicle, l.kg, atPickup));
+    const n = open ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
     const chosen = new Set<string>();
     if (l.carrierId) chosen.add(l.carrierId);
     while (chosen.size < Math.min(pool.length, n + (l.carrierId ? 1 : 0))) chosen.add(r.pick(pool).id);
     for (const cid of chosen) {
       const accepted = cid === l.carrierId;
-      // The winning bid names the truck that is doing the job.
-      const v = (accepted && l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined) ?? vehicleFor(cid, l.vehicle, l.kg);
+      const amount = accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5;
+      const pickupEta = l.pickupAt + r.int(-45, 75) * MIN;
+      // Never before the load was posted (a bid older than its load reads as left over from another one).
+      const at = Math.max(l.createdAt, Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR));
+      // The winning bid names the truck that is doing the job; the others, a truck that may run it at the load's
+      // pickup and, on an open load, at the pickup the bid offers.
+      const ok = open ? (x: Vehicle) => atPickup(x) && mayBid(l, x, pickupEta, bids) : atPickup;
+      const v = (accepted && l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined) ?? vehicleFor(cid, l.vehicle, l.kg, ok);
       if (!v) continue;
       bids.push({
         id: `b-${l.id}-${cid}`,
         loadId: l.id,
         carrierId: cid,
         vehicleId: v.id,
-        amount: accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5,
-        pickupEta: l.pickupAt + r.int(-45, 75) * MIN,
-        // Never before the load was posted (a bid older than its load reads as left over from another one).
-        at: Math.max(l.createdAt, Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR)),
-        status: l.status === "open" ? "pending" : accepted ? "accepted" : "rejected",
+        amount,
+        pickupEta,
+        at,
+        status: open ? "pending" : accepted ? "accepted" : "rejected",
       });
     }
   }

@@ -10,8 +10,9 @@
 //    counted per vehicle and per country;
 //  • a Community licence (lib/checks.ts) and, for drivers, a posting
 //    declaration.
-// The ledger is derived, never stored: the loads already in the store plus
-// what each vehicle did before the demo opened (VEHICLE_HISTORY). Not
+// The ledger is derived from the loads in the store, what each vehicle did
+// before the demo opened (VEHICLE_HISTORY) and the foreign jobs of loads the
+// market has since pruned from its board (PastJob, kept by the store). Not
 // modelled: the single operation allowed in a third country within 3 days of
 // an unladen entry (art. 8(2), second subparagraph). Zama treats that case as
 // "no incoming international carriage", which errs on the safe side.
@@ -33,11 +34,21 @@ const MIN = 60_000;
 
 const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit" });
 
+// Madrid is a whole number of hours off UTC, so its date is the same all through a UTC hour: the answer is cached
+// per hour (the market asks this many times a second).
+const dayEnds = new Map<string, number>();
+
 /** The last millisecond of the Madrid calendar day `plusDays` after the one containing `t`. */
 export function endOfMadridDay(t: number, plusDays = 0): number {
+  const key = `${Math.floor(t / (60 * MIN))}|${plusDays}`;
+  const hit = dayEnds.get(key);
+  if (hit !== undefined) return hit;
   const [y, m, d] = ymd.format(t).split("-").map(Number);
   const nextMidnightUtc = Date.UTC(y, m - 1, d + plusDays + 1);
-  return nextMidnightUtc - madridOffsetMinutes(new Date(nextMidnightUtc)) * MIN - 1;
+  const end = nextMidnightUtc - madridOffsetMinutes(new Date(nextMidnightUtc)) * MIN - 1;
+  if (dayEnds.size > 4_000) dayEnds.clear();
+  dayEnds.set(key, end);
+  return end;
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
@@ -52,10 +63,18 @@ export interface LedgerEvent {
   loadId?: string;
 }
 
+/** A cross-border or cabotage job of a load that is no longer in the store (pruned from the board). */
+export interface PastJob extends LedgerEvent {
+  vehicleId: string;
+  loadId: string;
+}
+
 export interface LedgerContext {
-  /** The moment the demo opened: VEHICLE_HISTORY counts back from it. */
+  /** The moment the demo opened: VEHICLE_HISTORY counts back from it (the store's `anchor`). */
   anchor: number;
   history?: VehicleEvent[];
+  /** Foreign jobs of loads pruned from the store (the store's `ledger`): they still count. */
+  past?: readonly PastJob[];
 }
 
 type LoadTimes = Pick<Load, "id" | "from" | "to" | "status" | "vehicleId" | "pickupAt" | "departedAt" | "deliveredAt">;
@@ -64,8 +83,16 @@ const driveMs = (from: PlaceId, to: PlaceId) => route(from, to).minutes * MIN;
 const startOf = (l: Pick<Load, "pickupAt" | "departedAt">) => l.departedAt ?? l.pickupAt;
 const endOf = (l: LoadTimes) => l.deliveredAt ?? startOf(l) + driveMs(l.from, l.to);
 
-/** Everything that counts for a vehicle's cabotage: its seeded history and its loads (assigned, moving or delivered). */
-export function vehicleEvents(vehicleId: string, loads: LoadTimes[], ctx: LedgerContext, except?: string): LedgerEvent[] {
+/** The ledger event of a load its vehicle runs (assigned, moving or delivered); null when it doesn't count. */
+function loadEvent(l: LoadTimes, carrierCountry: Country): LedgerEvent | null {
+  if (l.status !== "assigned" && l.status !== "inTransit" && l.status !== "delivered") return null;
+  const scope = jobScope(l, carrierCountry);
+  if (scope === "domestic") return null;
+  return { kind: scope, country: PLACES[l.to].country, start: startOf(l), end: endOf(l), loadId: l.id };
+}
+
+/** Everything that counts for a vehicle's cabotage: its seeded history, its loads (assigned, moving or delivered) and its pruned jobs. */
+export function vehicleEvents(vehicleId: string, loads: readonly LoadTimes[], ctx: LedgerContext, except?: string): LedgerEvent[] {
   const carrier = CARRIER.get(VEHICLE.get(vehicleId)?.carrierId ?? "");
   if (!carrier) return [];
   const events: LedgerEvent[] = (ctx.history ?? VEHICLE_HISTORY)
@@ -74,14 +101,69 @@ export function vehicleEvents(vehicleId: string, loads: LoadTimes[], ctx: Ledger
       const at = ctx.anchor - e.daysAgo * DAY;
       return { kind: e.kind, country: e.country, start: at, end: at };
     });
+  const inStore = new Set<string>();
   for (const l of loads) {
+    inStore.add(l.id);
     if (l.vehicleId !== vehicleId || l.id === except) continue;
-    if (l.status !== "assigned" && l.status !== "inTransit" && l.status !== "delivered") continue;
-    const scope = jobScope(l, carrier.country);
-    if (scope === "domestic") continue;
-    events.push({ kind: scope, country: PLACES[l.to].country, start: startOf(l), end: endOf(l), loadId: l.id });
+    const e = loadEvent(l, carrier.country);
+    if (e) events.push(e);
   }
+  for (const e of ctx.past ?? []) if (e.vehicleId === vehicleId && e.loadId !== except && !inStore.has(e.loadId)) events.push(e);
   return events.sort((a, b) => a.end - b.end);
+}
+
+// ── Pruned jobs ─────────────────────────────────────────────────────────────
+
+/** Older pruned jobs can't open a window (7 days) or a cooling-off (4 days) any more. */
+export const PAST_KEEP = 12 * DAY;
+/** Pruned jobs this recent are all kept, so a job starting up to this long ago is still checked exactly. */
+const PAST_EXACT = 6 * 60 * MIN;
+
+/** The ledger entries of delivered loads about to leave the store. */
+export function pastJobs(loads: readonly LoadTimes[]): PastJob[] {
+  const out: PastJob[] = [];
+  for (const l of loads) {
+    if (l.status !== "delivered" || !l.vehicleId) continue;
+    const carrier = CARRIER.get(VEHICLE.get(l.vehicleId)?.carrierId ?? "");
+    const e = carrier && loadEvent(l, carrier.country);
+    if (e) out.push({ ...e, vehicleId: l.vehicleId, loadId: l.id });
+  }
+  return out;
+}
+
+/**
+ * Only what a check can still use. Jobs of the last 6 hours are all kept;
+ * of the older ones, per vehicle, its latest international carriage (the
+ * window it opens), the cabotage since (the operations used) and its latest
+ * cabotage in each country (a cooling-off once it leaves). For a job starting
+ * after them, that is all the ledger reads, so the verdict doesn't change.
+ */
+export function compactPast(entries: readonly PastJob[], now: number): PastJob[] {
+  const byVehicle = new Map<string, PastJob[]>();
+  const keep = new Set<PastJob>();
+  for (const e of entries) {
+    if (e.end < now - PAST_KEEP) continue;
+    if (e.end >= now - PAST_EXACT) {
+      keep.add(e);
+      continue;
+    }
+    const list = byVehicle.get(e.vehicleId);
+    if (list) list.push(e);
+    else byVehicle.set(e.vehicleId, [e]);
+  }
+  for (const list of byVehicle.values()) {
+    list.sort((a, b) => a.end - b.end);
+    const incoming = list.filter((e) => e.kind === "international").pop();
+    if (incoming) keep.add(incoming);
+    const lastIn = new Map<Country, PastJob>();
+    for (const e of list) {
+      if (e.kind !== "cabotage") continue;
+      if (!incoming || e.end > incoming.end) keep.add(e);
+      lastIn.set(e.country, e);
+    }
+    for (const e of lastIn.values()) keep.add(e);
+  }
+  return entries.filter((e) => keep.has(e));
 }
 
 // ── The check ───────────────────────────────────────────────────────────────
@@ -109,7 +191,7 @@ export interface CabotageCheck {
  * May this vehicle run this load as a cabotage operation? `load` may be a
  * draft or an open load (its pickup time is used) or one already assigned.
  */
-export function cabotageCheck(load: Pick<Load, "id" | "from" | "to" | "pickupAt" | "departedAt">, vehicleId: string, loads: LoadTimes[], ctx: LedgerContext): CabotageCheck {
+export function cabotageCheck(load: Pick<Load, "id" | "from" | "to" | "pickupAt" | "departedAt">, vehicleId: string, loads: readonly LoadTimes[], ctx: LedgerContext): CabotageCheck {
   const carrier = CARRIER.get(VEHICLE.get(vehicleId)?.carrierId ?? "");
   if (!carrier || jobScope(load, carrier.country) !== "cabotage") return { cabotage: false, used: 0 };
   const host = PLACES[load.from].country;
@@ -144,7 +226,7 @@ export function cabotageCheck(load: Pick<Load, "id" | "from" | "to" | "pickupAt"
 }
 
 /** Where a vehicle stands in a country right now, for the Dispatch overview. */
-export function ledgerAt(vehicleId: string, country: Country, at: number, loads: LoadTimes[], ctx: LedgerContext): CabotageCheck | null {
+export function ledgerAt(vehicleId: string, country: Country, at: number, loads: readonly LoadTimes[], ctx: LedgerContext): CabotageCheck | null {
   const v = VEHICLE.get(vehicleId);
   const carrier = CARRIER.get(v?.carrierId ?? "");
   if (!v || !carrier || carrier.country === country) return null;
@@ -165,24 +247,10 @@ export interface RunVerdict {
   posting: boolean;
 }
 
-export function runVerdict(load: Pick<Load, "id" | "from" | "to" | "pickupAt" | "departedAt">, vehicle: Vehicle, loads: LoadTimes[], ctx: LedgerContext): RunVerdict {
+export function runVerdict(load: Pick<Load, "id" | "from" | "to" | "pickupAt" | "departedAt">, vehicle: Vehicle, loads: readonly LoadTimes[], ctx: LedgerContext): RunVerdict {
   const carrier = CARRIER.get(vehicle.carrierId);
   if (!carrier) return { ok: false, licence: [], cabotage: { cabotage: false, used: 0 }, posting: false };
   const licence = licenceProblems(carrier, vehicle, load, startOf(load));
   const cabotage = cabotageCheck(load, vehicle.id, loads, ctx);
   return { ok: !licence.length && !cabotage.block, licence, cabotage, posting: needsPostingDeclaration(load, carrier.country) };
-}
-
-// ── The demo's anchor ───────────────────────────────────────────────────────
-
-let anchorAt: number | null = null;
-
-/**
- * The moment the demo opened, for VEHICLE_HISTORY: the first market time the
- * UI asks about. Resetting the demo moves the clock back, which re-anchors.
- */
-export function historyAnchor(now: number): number {
-  // 0 means the market hasn't opened yet: don't anchor on it.
-  if (now > 0 && (anchorAt === null || now < anchorAt)) anchorAt = now;
-  return anchorAt ?? now;
 }

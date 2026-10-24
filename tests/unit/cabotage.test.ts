@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { VEHICLE } from "@/data/companies";
 import { buildLoads, eligibleCarriers } from "@/data/seed";
 import type { Load, VehicleEvent } from "@/data/types";
-import { cabotageCheck, DAY, endOfMadridDay, historyAnchor, ledgerAt, runVerdict } from "@/lib/cabotage";
+import { cabotageCheck, compactPast, DAY, endOfMadridDay, ledgerAt, pastJobs, runVerdict, type PastJob } from "@/lib/cabotage";
 
 // Wednesday 21 October 2026, 10:00 in Madrid.
 const T0 = Date.parse("2026-10-21T10:00:00+02:00");
@@ -144,10 +144,83 @@ describe("the seeded demo day", () => {
     expect(runVerdict(job("biarritz", "bayonne", T0 + 3 * H), VEHICLE.get("v-tx2")!, loads, { anchor: T0 })).toMatchObject({ ok: true, posting: true });
   });
 
-  it("anchors the history on the first market time, and again after a reset", () => {
-    const a = historyAnchor(T0 + 100 * DAY);
-    expect(historyAnchor(T0 + 101 * DAY)).toBe(a);
-    expect(historyAnchor(0)).toBe(a);
-    expect(historyAnchor(T0 + 50 * DAY)).toBe(T0 + 50 * DAY);
+});
+
+describe("jobs pruned from the board still count (the store's ledger)", () => {
+  // A French truck that unloaded an international load in Spain two hours ago, then ran cabotage there.
+  const incoming = ran("ZM-9001", "v-ad3", "bayonne", "pasaia", T0 - 2 * H);
+  const ctx = { anchor: T0, history: [] };
+
+  it("keeps the incoming carriage that opened the window after its load is gone", () => {
+    const next = job("pasaia", "irun", T0 + H);
+    expect(cabotageCheck(next, "v-ad3", [incoming], ctx).block).toBeUndefined();
+    // Pruned from the store: without the ledger the window would close; with it nothing changes.
+    expect(cabotageCheck(next, "v-ad3", [], ctx).block).toBe("noIncoming");
+    expect(cabotageCheck(next, "v-ad3", [], { ...ctx, past: pastJobs([incoming]) })).toEqual(cabotageCheck(next, "v-ad3", [incoming], ctx));
+  });
+
+  it("counts pruned cabotage operations toward the limit and the cooling-off", () => {
+    const ops = [1, 3, 5].map((h, i) => ran(`ZM-910${i}`, "v-ad3", "pasaia", "irun", T0 + h * H));
+    const past = pastJobs([incoming, ...ops]);
+    expect(past.map((e) => e.kind)).toEqual(["international", "cabotage", "cabotage", "cabotage"]);
+    expect(cabotageCheck(job("irun", "pasaia", T0 + 8 * H), "v-ad3", [], { ...ctx, past }).block).toBe("limit");
+    // It leaves Spain: four days without cabotage there, though every load involved has left the board.
+    const out = ran("ZM-9200", "v-ad3", "irun", "bayonne", T0 + 10 * H);
+    expect(cabotageCheck(job("pasaia", "irun", T0 + DAY), "v-ad3", [], { ...ctx, past: pastJobs([incoming, ...ops, out]) }).block).toBe("coolingOff");
+  });
+
+  it("only remembers delivered cross-border and cabotage jobs", () => {
+    const domestic = ran("ZM-9300", "v-ad3", "bayonne", "biarritz", T0);
+    const moving = ran("ZM-9301", "v-ad3", "bayonne", "pasaia", T0, "inTransit");
+    expect(pastJobs([domestic, moving])).toEqual([]);
+  });
+
+  it("compacts old entries without changing any verdict", () => {
+    // Random histories per vehicle, all pruned more than six hours ago, then probe jobs after them.
+    let seed = 7;
+    const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const lanes: [Load["from"], Load["to"]][] = [
+      ["bayonne", "pasaia"],
+      ["pasaia", "irun"],
+      ["irun", "bayonne"],
+      ["biarritz", "bayonne"],
+      ["irun", "pasaia"],
+      ["hendaye", "anglet"],
+      ["anglet", "irun"],
+    ];
+    const outcomes = new Set<string>();
+    let compacted = 0;
+    for (const vehicleId of ["v-ad3", "v-br3", "v-tx2", "v-lb2"]) {
+      for (let h = 0; h < 8; h++) {
+        const loads: Load[] = [];
+        let t = T0 - 9 * DAY;
+        const n = 2 + Math.floor(rand() * 30);
+        for (let k = 0; k < n; k++) {
+          t += (1 + rand() * 14) * H;
+          const [from, to] = lanes[Math.floor(rand() * lanes.length)];
+          loads.push(ran(`ZM-${vehicleId}-${h}-${k}`, vehicleId, from, to, t));
+        }
+        const now = t + 7 * H;
+        const full = pastJobs(loads);
+        const compact = compactPast(full, now);
+        compacted += full.length - compact.length;
+        for (let p = 0; p < 20; p++) {
+          const [from, to] = lanes[Math.floor(rand() * lanes.length)];
+          const probe = job(from, to, now + rand() * 6 * DAY, `probe-${p}`);
+          const a = cabotageCheck(probe, vehicleId, [], { ...ctx, past: full });
+          const b = cabotageCheck(probe, vehicleId, [], { ...ctx, past: compact });
+          expect(b, `${vehicleId} ${from}→${to}`).toEqual(a);
+          if (a.cabotage) outcomes.add(a.block ?? "ok");
+        }
+      }
+    }
+    expect(compacted).toBeGreaterThan(100);
+    // The probes met every outcome, so the comparison means something.
+    expect([...outcomes].sort()).toEqual(["coolingOff", "limit", "noIncoming", "ok", "window"]);
+  });
+
+  it("forgets what can no longer matter", () => {
+    const old = pastJobs([ran("ZM-9400", "v-ad3", "bayonne", "pasaia", T0 - 13 * DAY)]);
+    expect(compactPast(old, T0)).toEqual([] as PastJob[]);
   });
 });

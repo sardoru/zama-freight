@@ -13,7 +13,7 @@ import type { Bid, Country, EcmrState, EcoLabel, Load, ReturnTrip, Vehicle } fro
 import { useI18n } from "@/i18n/client";
 import { INTL_LOCALE, type Locale } from "@/i18n/config";
 import type { Dict } from "@/i18n/types";
-import { CABOTAGE_LIMIT, historyAnchor, runVerdict, type RunVerdict } from "@/lib/cabotage";
+import { CABOTAGE_LIMIT, runVerdict, type RunVerdict } from "@/lib/cabotage";
 import { hasDgtLabel, jobScope, licenceLocalName, needsPostingDeclaration, touchesZbe, touchesZfe, transportDocument, ZBE_PHASE2, zbeFor, type DocKind } from "@/lib/checks";
 import { TZ } from "@/lib/format";
 import { cn, fill } from "@/lib/utils";
@@ -54,11 +54,13 @@ export function useDeadlines() {
   return useMemo(() => deadlineFmt(lang), [lang]);
 }
 
-/** The loads, market time and history anchor that the rule checks need. */
+/** What the rule checks need: the loads, the market time, and the cabotage ledger's anchor and pruned jobs (the director uses the same). */
 export function useRuleCtx() {
   const loads = useMarket((s) => s.loads);
+  const anchor = useMarket((s) => s.anchor);
+  const past = useMarket((s) => s.ledger);
   const now = useSimNow();
-  return { loads, now, anchor: historyAnchor(now) };
+  return { loads, now, anchor, past };
 }
 
 type RuleJob = Pick<Load, "id" | "from" | "to" | "pickupAt"> & Partial<Pick<Load, "departedAt">>;

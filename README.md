@@ -112,12 +112,14 @@ Pure functions in `src/lib/checks.ts` and `src/lib/cabotage.ts`, checked against
     same vehicle;
   - then a **4-day cooling-off** in that country once the vehicle has left it.
 
-  The ledger is derived from the loads in the market plus each vehicle's history before the demo opened
-  (`VEHICLE_HISTORY` in `src/data/companies.ts`). Bids show "Cabotage n/3 · this vehicle", accepting, assigning or
-  booking over the limit is blocked, and Dispatch lists every vehicle's window and cooling-off. Drivers on cabotage and
-  cross-trade jobs are posted, so a posting declaration is flagged. The simulated market's own bids and accepts still
-  use a quicker per-carrier count (`cabotageUsed`). Not modelled: the single operation allowed in a third country
-  within 3 days of an unladen entry.
+  The ledger is derived from the loads in the market, each vehicle's history before the market opened
+  (`VEHICLE_HISTORY` in `src/data/companies.ts`, counted back from the store's `anchor`) and the cross-border and
+  cabotage jobs of loads the market has since pruned from the board (the store's `ledger`), so an operation still
+  counts after its load is gone. Bids show "Cabotage n/3 · this vehicle", accepting, assigning or booking over the
+  limit is blocked, and Dispatch lists every vehicle's window and cooling-off. Drivers on cabotage and cross-trade jobs
+  are posted, so a posting declaration is flagged. The simulated market checks every bid, booking and truck it picks
+  with the same per-vehicle rules (see [How the simulation works](#how-the-simulation-works)). Not modelled: the single
+  operation allowed in a third country within 3 days of an unladen entry.
 - **Transport document**, with who issues it; every load shows which one applies:
   - inside Spain, the **DeCA**: the contracting shipper and the carrier issue it, and it is electronic from
     **5 October 2026** (Ley 9/2025). Cabotage is included. Exempt (flagged): transport needing no licence, house
@@ -209,6 +211,16 @@ them, and the dock schedule rolls forward. It runs on simulated time (rates per 
 five minutes), so a background tab that the browser throttles to one tick a minute sees the same market, and it keeps
 at least six trucks on the road. After more than six simulated hours without a tick (a sleeping laptop, a frozen tab)
 the day is re-seeded around the current time.
+
+The other carriers follow the same rules as you. Every bid, booking, return-trip match and truck the director picks
+must pass the checks the screens show for that vehicle (licence, tachograph, its cabotage ledger and the Donostia
+ZBE: `mayRun` in `src/store/director.ts`), at the pickup the bid offers and at the load's own, so the simulated market
+never makes a bid or a booking the screens mark as not allowed. A load booked after its pickup time is picked up then
+(its pickup and deadline move on), so its rules are checked for when the truck actually runs it. And so that what a
+truck may do can't change under a job it holds, a truck with cabotage in hand takes no other cross-border work, and
+takes cabotage only with no other cross-border work in hand (`mayTake`). Cabotage stays rare as a result (about 15 bids
+and 14 operations in 160 simulated hours), as on the real corridor. `tests/unit/market.test.ts` checks all of this at
+every tick of an 8-hour run, and judges every cabotage operation against everything its vehicle ever did.
 
 What you create yourself (loads you post, your bids, return trips, dock bookings, warehouse changes, role and map
 settings) is saved in your browser (`localStorage`, key `zama-demo-v1`, schema version 2, see `src/store/saved.ts`)
