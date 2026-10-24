@@ -4,6 +4,7 @@ import { ArrowRight, Gavel, MapPin, Repeat, Search, Truck, X } from "lucide-reac
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { Feed } from "@/components/feed";
 import { blockReason, ChecksList, DemoNote, EcmrTimeline, FictionalTag, labelText, LoadCard, RuleChip, useDeadlines, useRuleCtx } from "@/components/load-bits";
@@ -129,7 +130,8 @@ export function LoadBoard() {
 
   return (
     <Page>
-      <PageHeader title={d.loads.title} lead={n(d.loads.lead, counts.open)} />
+      {/* The shell shows the title while the market starts (intro.ts); the lead counts the open loads. */}
+      <PageHeader title={screenIntro("loads", d, place).title} lead={n(d.loads.lead, counts.open)} />
       <div className="mt-4 flex flex-col gap-2.5">
         <Segmented value={tab} onChange={setTab} options={tabs} label={d.loads.title} className="self-start" />
         <div className="flex flex-wrap items-center gap-2">

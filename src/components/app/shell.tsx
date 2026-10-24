@@ -23,6 +23,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LangSwitcher } from "@/components/lang-switcher";
+import { screenIntro } from "@/components/app/intro";
 import { LogoMark } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme";
 import { Spinner, useModalFocus } from "@/components/ui";
@@ -54,7 +55,6 @@ function useActive() {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const ready = useMarket((s) => s.ready);
-  const { d } = useI18n();
 
   useEffect(() => {
     const s = useMarket.getState();
@@ -77,12 +77,31 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex min-h-0 flex-1">
         <SideNav />
         <main id="main" className="relative min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-thin">
-          {ready ? children : <Spinner label={d.app.preparing} className="h-full" />}
+          {ready ? children : <Preparing />}
         </main>
       </div>
       <BottomNav />
       <Toasts />
     </div>
+  );
+}
+
+/**
+ * Before the market is ready: the screen's own header over a spinner. It is in the server HTML, so the title and lead
+ * paint with the first frame (issue #18); the map has no header, only its credits (also in the server HTML).
+ */
+function Preparing() {
+  const { d, lang, place } = useI18n();
+  const pathname = usePathname();
+  const base = `/${lang}/app`;
+  const screen = NAV.find((n) => n.href && pathname.startsWith(base + n.href))?.id;
+  if (!screen || screen === "map") return <Spinner label={d.app.preparing} className="h-full" />;
+  const intro = screenIntro(screen, d, place);
+  return (
+    <Page className={intro.wide ? "max-w-none" : undefined}>
+      <PageHeader title={intro.title} lead={intro.lead} />
+      <Spinner label={d.app.preparing} className="py-16" />
+    </Page>
   );
 }
 
@@ -189,9 +208,11 @@ function SimClock() {
       className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 text-sm text-ink transition hover:border-line-strong"
     >
       <Clock className="size-4 text-signal" aria-hidden />
-      <span className="tnum font-mono text-[0.8rem] font-semibold">{now ? f.time(now) : "--:--"}</span>
+      {/* Tabular Manrope rather than the mono font: this is in the first frame of every screen, and the mono font
+          would then be fetched before it (issue #18). A fixed width, so "--:--" becoming the time moves nothing. */}
+      <span className="tnum inline-block w-[4.6ch] text-center text-[0.8rem] font-semibold">{now ? f.time(now) : "--:--"}</span>
       {/* Hidden on the narrowest phones to leave room for the role name; the speed stays in the label. */}
-      <span className="tnum hidden rounded bg-surface-2 px-1 font-mono text-[0.68rem] font-semibold text-ink-3 min-[25rem]:inline">×{speed}</span>
+      <span className="tnum hidden rounded bg-surface-2 px-1 text-[0.68rem] font-semibold text-ink-3 min-[25rem]:inline">×{speed}</span>
     </button>
   );
 }

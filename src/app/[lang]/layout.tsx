@@ -8,8 +8,11 @@ import { getDict } from "@/i18n/get-dict";
 import { SITE_URL } from "@/lib/site";
 import "../globals.css";
 
-const manrope = Manrope({ subsets: ["latin", "latin-ext", "cyrillic"], variable: "--font-manrope", display: "swap" });
-const mono = JetBrains_Mono({ subsets: ["latin", "cyrillic"], variable: "--font-jetbrains", display: "swap", weight: ["500", "600"] });
+// Only Manrope's latin file is preloaded (issue #18): preloads share the phone's bandwidth with the first scripts, so
+// they delay the first paint. Its latin-ext and cyrillic files (and the mono font, used for ids and plates) still
+// load on demand through their unicode ranges, swapping in when a page uses them.
+const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope", display: "swap" });
+const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains", display: "swap", weight: ["500", "600"], preload: false });
 
 export const dynamicParams = false;
 

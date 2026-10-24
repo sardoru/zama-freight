@@ -3,6 +3,7 @@
 import { ArrowDownUp, CircleAlert, FileCheck, Gavel, Leaf, Repeat, Zap } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { blockReason, DemoNote, docName, FictionalTag, useDeadlines, useRuleCtx } from "@/components/load-bits";
 import { RouteMini } from "@/components/route-mini";
@@ -144,7 +145,8 @@ export function PostLoad() {
 
   return (
     <Page>
-      <PageHeader title={d.post.title} lead={d.post.lead} actions={role !== "shipper" ? <Chip tone="accent">{SHIPPER.get(ME.shipperId)?.name}</Chip> : null} />
+      {/* The header the shell shows while the market starts (intro.ts), with who you post as. */}
+      <PageHeader {...screenIntro("post", d, place)} actions={role !== "shipper" ? <Chip tone="accent">{SHIPPER.get(ME.shipperId)?.name}</Chip> : null} />
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_25rem] xl:grid-cols-[minmax(0,1fr)_28rem]">
         <form
           className="space-y-5"

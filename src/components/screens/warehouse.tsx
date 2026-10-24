@@ -4,6 +4,7 @@ import { ArrowRight, Ban, Bot, Boxes, CalendarClock, ClipboardCheck, Eye, Hand, 
 import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { Fragment, useMemo, useRef, useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { useIsDark } from "@/components/theme";
 import { Button, Card, Chip, Empty, Field, inputClass, SectionTitle, Segmented, Sheet, Spinner, Stat } from "@/components/ui";
@@ -207,7 +208,8 @@ export function WarehouseScreen() {
 
   return (
     <Page className="max-w-none">
-      <PageHeader title={d.wh.title} lead={d.wh.lead} />
+      {/* The same header the shell shows while the market starts (intro.ts). */}
+      <PageHeader {...screenIntro("warehouse", d, place)} />
       {/* p-1 leaves room for the cards' focus ring inside the scroller; -mx-1 keeps them in line with the page. */}
       <div className="-mx-1 mt-3 flex gap-2 overflow-x-auto p-1 scrollbar-thin">
         {WAREHOUSES.map((x) => (

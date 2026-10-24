@@ -2,6 +2,7 @@
 
 import { Repeat, Star, Truck } from "lucide-react";
 import { useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { blockReason, DemoNote, FictionalTag, useDeadlines, useRuleCtx } from "@/components/load-bits";
 import { Button, Card, Chip, EcoBadge, Empty, Field, inputClass, Progress, SectionTitle } from "@/components/ui";
@@ -40,7 +41,8 @@ export function Fleet() {
 
   return (
     <Page>
-      <PageHeader title={d.fleet.title} lead={d.fleet.lead.replace("{{carrier}}", me.name).replace("{{n}}", String(fleet.length)).replace("{{base}}", place(me.base))} />
+      {/* The same header the shell shows while the market starts (intro.ts). */}
+      <PageHeader {...screenIntro("fleet", d, place)} />
       <Card className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 p-4">
         <div className="flex items-center gap-3">
           <span className="inline-flex size-11 items-center justify-center rounded-xl bg-signal-soft text-signal">

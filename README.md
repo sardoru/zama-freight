@@ -197,6 +197,11 @@ urban hub and the Adour depot in the port of Bayonne. Names that borrow a real s
 - **Share cards**: a custom 1200×630 Open Graph image per language with alt text in that language, rendered with
   `next/og` on the first request and cached.
 - **App icon, web manifest, robots and sitemap**; the demo app itself is `noindex`.
+- **Fast first paint**: each screen's title and lead are in the server HTML (the shell shows them while the market
+  starts, `src/components/app/intro.ts`), only Manrope's latin file is preloaded (latin-ext, cyrillic and the mono
+  font load on demand), and the top bar's clock uses tabular Manrope rather than the mono font. Lighthouse 12 mobile
+  on a production build: `/es/app` LCP 2.25–2.80 s (median 2.80 s, was 2.71–3.25 s), `/es/app/warehouse` 2.41–2.95 s
+  (median 2.95 s, was 3.56–3.77 s), FCP 0.9 s, CLS ≤ 0.001.
 
 ---
 

@@ -2,6 +2,7 @@
 
 import { CircleAlert, ShieldAlert, Timer, Truck, Warehouse as WarehouseIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { blockReason, labelText, useDeadlines, useRuleCtx, whereText } from "@/components/load-bits";
 import { Button, Card, Chip, Empty, EcoBadge, inputClass, Progress, SectionTitle, Segmented, Sheet, Stat } from "@/components/ui";
@@ -27,7 +28,7 @@ const COLS: { status: LoadStatus; key: "colOpen" | "colBooked" | "colAssigned" |
 ];
 
 export function Dispatch() {
-  const { d, f } = useI18n();
+  const { d, f, place } = useI18n();
   const loads = useMarket((s) => s.loads);
   const docks = useMarket((s) => s.docks);
   const now = useSimNow();
@@ -84,7 +85,8 @@ export function Dispatch() {
 
   return (
     <Page className="max-w-none">
-      <PageHeader title={d.dispatch.title} lead={d.dispatch.lead} />
+      {/* The same header the shell shows while the market starts (intro.ts). */}
+      <PageHeader {...screenIntro("dispatch", d, place)} />
       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label={d.dispatch.kpiOnTime} value={f.pct(onTimePct)} tone={onTimePct >= 0.9 ? "green" : "warn"} />
         <Stat label={d.dispatch.kpiIdle} value={String(VEHICLES.length - busy.size)} sub={`/ ${VEHICLES.length}`} />
