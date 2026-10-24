@@ -23,16 +23,17 @@ export function LangSwitcher({ className }: { className?: string }) {
   return (
     <label
       className={cn(
-        "relative inline-flex h-9 items-center rounded-lg border border-line bg-surface text-sm text-ink-2 transition focus-within:border-accent hover:border-line-strong hover:text-ink",
+        "relative inline-flex h-10 items-center rounded-lg border border-line bg-surface text-sm text-ink-2 transition focus-within:border-accent hover:border-line-strong hover:text-ink",
         className,
       )}
     >
       <Globe className="pointer-events-none absolute left-2.5 size-4" aria-hidden />
       <span className="sr-only">{d.common.language}</span>
+      {/* No outline-none: keyboard focus gets the global focus ring. */}
       <select
         value={lang}
         onChange={(e) => change(e.target.value as Locale)}
-        className="h-full cursor-pointer appearance-none bg-transparent pr-2.5 pl-8 font-medium outline-none"
+        className="h-full w-full cursor-pointer appearance-none rounded-lg bg-transparent pr-2.5 pl-8 font-medium"
       >
         {LOCALES.map((l) => (
           <option key={l} value={l} lang={l}>

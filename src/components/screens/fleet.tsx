@@ -11,6 +11,7 @@ import { driveMs, fitsReturn, HOUR } from "@/data/seed";
 import type { Load, ReturnTrip, Vehicle } from "@/data/types";
 import { useI18n } from "@/i18n/client";
 import { LOCALE_NAMES } from "@/i18n/config";
+import { hasDgtLabel } from "@/lib/checks";
 import { fromMadridInput, toMadridInput } from "@/lib/format";
 import { VEHICLE_SPECS } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
@@ -74,7 +75,7 @@ export function Fleet() {
                 <Card key={v.id} className="p-3.5">
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-sm font-bold text-ink">{v.plate}</span>
-                    <EcoBadge label={v.eco} />
+                    {hasDgtLabel(v) ? <EcoBadge label={v.eco} /> : null}
                     <span className="text-xs text-ink-3">{d.vehicles[v.type]}</span>
                   </div>
                   <div className="mt-1 text-sm text-ink-2">
@@ -141,7 +142,7 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
           {!own ? <div className="truncate text-xs font-semibold text-ink-3">{CARRIER.get(rt.carrierId)?.name}</div> : null}
-          <div className="truncate font-bold text-ink">
+          <div className="leading-snug font-bold text-pretty text-ink">
             {place(rt.from)} → {place(rt.to)}
           </div>
           <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-ink-3">
@@ -154,7 +155,7 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
             ) : null}
           </div>
         </div>
-        <Chip tone="lime">−{Math.round(rt.discount * 100)} %</Chip>
+        <Chip tone="lime">{d.map.discount.replace("{{pct}}", String(Math.round(rt.discount * 100)))}</Chip>
       </div>
       {rt.status === "matched" ? (
         <p className="mt-2 text-[0.8rem] font-semibold text-green">{d.fleet.matched.replace("{{load}}", matched?.id ?? rt.matchedLoadId ?? "")}</p>
@@ -252,16 +253,16 @@ function PostReturn({ prefill, fleet }: { prefill: { vehicleId: string; from: Pl
             </select>
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-2.5">
-          <Field label={d.fleet.depart}>
-            <input type="datetime-local" value={at} onChange={(e) => e.target.value && setAt(e.target.value)} className={inputClass} />
-          </Field>
-          <Field label={d.fleet.free}>
-            <input type="number" min={1} max={max} value={free} onChange={(e) => setFree(Math.max(1, Math.min(max, Number(e.target.value) || 1)))} className={cn(inputClass, "tnum")} />
-          </Field>
-        </div>
-        <Field label={`${d.fleet.discount} · −${discount} %`}>
-          <input type="range" min={10} max={45} step={1} value={discount} onChange={(e) => setDiscount(Number(e.target.value))} className="w-full accent-[var(--z-lime)]" />
+        {/* A row of its own: a date-time field needs ~230px before it cuts the time off. */}
+        <Field label={d.fleet.depart}>
+          <input type="datetime-local" value={at} onChange={(e) => e.target.value && setAt(e.target.value)} className={inputClass} />
+        </Field>
+        <Field label={d.fleet.free}>
+          <input type="number" min={1} max={max} value={free} onChange={(e) => setFree(Math.max(1, Math.min(max, Number(e.target.value) || 1)))} className={cn(inputClass, "tnum")} />
+        </Field>
+        <Field label={`${d.fleet.discount} · ${d.map.discount.replace("{{pct}}", String(discount))}`}>
+          {/* 40px tall so the thumb is easy to grab on a phone. */}
+          <input type="range" min={10} max={45} step={1} value={discount} onChange={(e) => setDiscount(Number(e.target.value))} className="h-10 w-full accent-[var(--z-lime)]" />
         </Field>
         <Button type="submit" variant="lime" className="w-full" disabled={from === to}>
           {d.fleet.submit}

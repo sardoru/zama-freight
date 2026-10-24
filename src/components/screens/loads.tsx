@@ -2,6 +2,7 @@
 
 import { ArrowRight, Gavel, MapPin, Repeat, Search, Truck, X } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { Page, PageHeader } from "@/components/app/shell";
 import { Feed } from "@/components/feed";
@@ -12,11 +13,11 @@ import { CARRIER, DRIVER, ME, SHIPPER, VEHICLE, VEHICLES } from "@/data/companie
 import { CARRIES, fitsReturn } from "@/data/seed";
 import type { Bid, Load, ReturnTrip, VehicleType } from "@/data/types";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, CABOTAGE_USED, isCabotage } from "@/lib/checks";
+import { CABOTAGE_LIMIT, cabotageUsed, hasDgtLabel, isCabotage } from "@/lib/checks";
 import { fromMadridInput, toMadridInput } from "@/lib/format";
 import { quote } from "@/lib/pricing";
 import { useMedia } from "@/lib/use-media";
-import { cn } from "@/lib/utils";
+import { cn, fill } from "@/lib/utils";
 import { useMarket } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
 
@@ -43,15 +44,18 @@ export function useReturnMatches(loads: Load[], returns: ReturnTrip[]) {
 }
 
 export function LoadBoard() {
-  const { d, place } = useI18n();
+  const { d, place, n } = useI18n();
   const role = useMarket((s) => s.role);
   const loads = useMarket((s) => s.loads);
   const bids = useMarket((s) => s.bids);
   const returns = useMarket((s) => s.returns);
   const now = useSimNow();
   const wide = useMedia("(min-width: 1024px)");
+  // useSearchParams, not window.location: after a client-side navigation
+  // (Post load, the map's "Open in load board") the browser URL is only updated after this first render.
+  const params = useSearchParams();
 
-  const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get("id"));
+  const [selected, setSelected] = useState<string | null>(() => params.get("id"));
   const [tab, setTab] = useState<Tab>(() => {
     const l = selected ? useMarket.getState().loads.find((x) => x.id === selected) : undefined;
     return !l || l.status === "open" ? "open" : "all";
@@ -97,9 +101,9 @@ export function LoadBoard() {
   if (vehicle !== "any") list = list.filter((l) => l.vehicle === vehicle);
   if (mine) list = list.filter(isMine);
   if (q.trim()) {
-    const n = norm(q.trim());
+    const needle = norm(q.trim());
     list = list.filter((l) =>
-      [l.id, place(l.from), place(l.to), SHIPPER.get(l.shipperId)?.name ?? "", l.carrierId ? (CARRIER.get(l.carrierId)?.name ?? "") : "", d.goods[l.goods]].some((s) => norm(s).includes(n)),
+      [l.id, place(l.from), place(l.to), SHIPPER.get(l.shipperId)?.name ?? "", l.carrierId ? (CARRIER.get(l.carrierId)?.name ?? "") : "", d.goods[l.goods]].some((s) => norm(s).includes(needle)),
     );
   }
   list = [...list].sort((a, b) =>
@@ -124,7 +128,7 @@ export function LoadBoard() {
 
   return (
     <Page>
-      <PageHeader title={d.loads.title} lead={d.loads.lead.replace("{{open}}", String(counts.open))} />
+      <PageHeader title={d.loads.title} lead={n(d.loads.lead, counts.open)} />
       <div className="mt-4 flex flex-col gap-2.5">
         <Segmented value={tab} onChange={setTab} options={tabs} label={d.loads.title} className="self-start" />
         <div className="flex flex-wrap items-center gap-2">
@@ -140,7 +144,7 @@ export function LoadBoard() {
               </option>
             ))}
           </select>
-          <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} className={cn(inputClass, "w-auto")} aria-label="Sort">
+          <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} className={cn(inputClass, "w-auto")} aria-label={d.loads.sort}>
             <option value="pickup">{d.loads.sortPickup}</option>
             <option value="price">{d.loads.sortPrice}</option>
             <option value="km">{d.loads.sortKm}</option>
@@ -351,7 +355,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
         <div className="flex items-center gap-2.5 rounded-xl border border-line px-3 py-2.5 text-sm">
           <Truck className="size-4 text-signal" aria-hidden />
           <span className="font-mono font-semibold text-ink">{v.plate}</span>
-          <EcoBadge label={v.eco} />
+          {hasDgtLabel(v) ? <EcoBadge label={v.eco} /> : null}
           <span className="min-w-0 truncate text-ink-3">
             {DRIVER.get(v.driverId)?.name} · {CARRIER.get(v.carrierId)?.name}
           </span>
@@ -401,10 +405,14 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function BidRow({ bid, load, canAccept, onAccept }: { bid: Bid; load: Load; canAccept: boolean; onAccept: () => void }) {
   const { d, f } = useI18n();
+  const loads = useMarket((s) => s.loads);
   const c = CARRIER.get(bid.carrierId);
   const v = VEHICLE.get(bid.vehicleId);
   const cab = isCabotage(load, bid.carrierId);
-  const used = CABOTAGE_USED[bid.carrierId] ?? 0;
+  const used = cab ? cabotageUsed(bid.carrierId, loads) : 0;
+  // Once this carrier holds the load, it is already one of the `used` operations.
+  const held = load.carrierId === bid.carrierId && load.status !== "open" && load.status !== "cancelled";
+  const full = held ? used > CABOTAGE_LIMIT : used >= CABOTAGE_LIMIT;
   return (
     <li
       className={cn(
@@ -418,15 +426,15 @@ function BidRow({ bid, load, canAccept, onAccept }: { bid: Bid; load: Load; canA
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="truncate text-sm font-bold text-ink">{c?.name}</span>
             <span className="text-[0.7rem] font-semibold text-ink-3">
-              {c?.country} · {c?.rating.toFixed(1)} ★
+              {c?.country} · {c ? f.num(c.rating, 1) : ""} ★
             </span>
             {bid.mine ? <Chip tone="accent">{d.loads.yourBid}</Chip> : null}
-            {cab ? <Chip tone={used >= CABOTAGE_LIMIT ? "danger" : "warn"}>{`Cabotage ${used}/${CABOTAGE_LIMIT}`}</Chip> : null}
+            {cab ? <Chip tone={full ? "danger" : "warn"}>{fill(d.checks.cabotageChip, { used, limit: CABOTAGE_LIMIT })}</Chip> : null}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-ink-3">
             {v ? (
               <>
-                <EcoBadge label={v.eco} className="h-4 min-w-4 px-1 text-[0.55rem]" />
+                {hasDgtLabel(v) ? <EcoBadge label={v.eco} className="h-4 min-w-4 px-1 text-[0.55rem]" /> : null}
                 <span>{d.vehiclesShort[v.type]}</span>
                 <span className="font-mono">{v.plate}</span>
               </>
@@ -487,22 +495,22 @@ function BidForm({ load }: { load: Load }) {
         <Gavel className="size-4" aria-hidden />
         {existing ? d.loads.yourBid : d.loads.placeBid}
       </div>
-      <div className="grid grid-cols-2 gap-2.5">
-        <Field
-          label={d.loads.amount}
-          hint={amount < qt.low ? <span className="text-green">{d.loads.lowBid}</span> : amount > qt.high ? <span className="text-warn">{d.loads.highBid}</span> : d.loads.fairRange.replace("{{low}}", f.money(qt.low)).replace("{{high}}", f.money(qt.high))}
-        >
-          <input type="number" inputMode="numeric" min={1} step={1} value={amount} onChange={(e) => setAmount(Number(e.target.value))} className={cn(inputClass, "tnum font-bold")} />
-        </Field>
-        <Field label={d.loads.pickupEta}>
-          <input type="datetime-local" value={eta} onChange={(e) => setEta(e.target.value)} className={inputClass} />
-        </Field>
-      </div>
+      <Field
+        label={d.loads.amount}
+        hint={amount < qt.low ? <span className="text-green">{d.loads.lowBid}</span> : amount > qt.high ? <span className="text-warn">{d.loads.highBid}</span> : d.loads.fairRange.replace("{{low}}", f.money(qt.low)).replace("{{high}}", f.money(qt.high))}
+      >
+        <input type="number" inputMode="numeric" min={1} step={1} value={amount} onChange={(e) => setAmount(Number(e.target.value))} className={cn(inputClass, "tnum font-bold")} />
+      </Field>
+      {/* A row of its own: a date-time field needs ~230px before it cuts the time off. */}
+      <Field label={d.loads.pickupEta}>
+        <input type="datetime-local" value={eta} onChange={(e) => setEta(e.target.value)} className={inputClass} />
+      </Field>
       <Field label={d.loads.yourVehicle}>
         <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className={inputClass}>
           {fleet.map((v) => (
             <option key={v.id} value={v.id}>
-              {v.plate} · {d.vehiclesShort[v.type]} · {v.eco} · {DRIVER.get(v.driverId)?.name}
+              {v.plate} · {d.vehiclesShort[v.type]}
+              {hasDgtLabel(v) ? ` · ${v.eco}` : ""} · {DRIVER.get(v.driverId)?.name}
               {busy.has(v.id) ? ` (${d.loads.vehicleBusy})` : ""}
             </option>
           ))}
@@ -533,7 +541,9 @@ function DispatchActions({ load }: { load: Load }) {
   const advance = useMarket((s) => s.advance);
   const busy = new Set(loads.filter((l) => l.id !== load.id && (l.status === "assigned" || l.status === "inTransit") && l.vehicleId).map((l) => l.vehicleId));
   const fleet = VEHICLES.filter((v) => v.carrierId === load.carrierId && CARRIES[v.type].includes(load.vehicle));
-  const [vehicleId, setVehicleId] = useState(load.vehicleId ?? (fleet.find((v) => !busy.has(v.id)) ?? fleet[0])?.id ?? "");
+  // Only a free truck can be picked: if the chosen one gets another job meanwhile, fall back to the first free one.
+  const [picked, setPicked] = useState<string | null>(null);
+  const vehicleId = load.vehicleId ?? (picked && !busy.has(picked) ? picked : (fleet.find((v) => !busy.has(v.id))?.id ?? ""));
   if (load.status === "delivered" || load.status === "cancelled") return null;
   return (
     <div className="space-y-2.5 rounded-2xl border border-warn/40 bg-warn-soft/50 p-3.5">
@@ -543,10 +553,17 @@ function DispatchActions({ load }: { load: Load }) {
       </div>
       {load.status === "booked" ? (
         <div className="flex flex-wrap gap-2">
-          <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className={cn(inputClass, "min-w-0 flex-1")} aria-label={d.common.vehicle}>
+          <select value={vehicleId} onChange={(e) => setPicked(e.target.value)} className={cn(inputClass, "min-w-0 flex-1")} aria-label={d.common.vehicle}>
+            {/* Every truck is on a job: show a dash rather than a blank box until one comes back. */}
+            {vehicleId ? null : (
+              <option value="" disabled hidden>
+                —
+              </option>
+            )}
             {fleet.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.plate} · {d.vehiclesShort[v.type]} · {v.eco}
+              <option key={v.id} value={v.id} disabled={busy.has(v.id)}>
+                {v.plate} · {d.vehiclesShort[v.type]}
+                {hasDgtLabel(v) ? ` · ${v.eco}` : ""}
                 {busy.has(v.id) ? ` (${d.loads.vehicleBusy})` : ""}
               </option>
             ))}
@@ -566,7 +583,7 @@ function DispatchActions({ load }: { load: Load }) {
           {d.loads.deliver}
         </Button>
       ) : null}
-      {load.vehicleId || vehicleId ? <ChecksList load={load} carrierId={load.carrierId} vehicleId={load.vehicleId ?? vehicleId} /> : null}
+      {vehicleId ? <ChecksList load={load} carrierId={load.carrierId} vehicleId={vehicleId} /> : null}
     </div>
   );
 }

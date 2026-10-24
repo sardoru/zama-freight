@@ -53,7 +53,7 @@ export default async function Landing({ params }: PageProps<"/[lang]">) {
     { v: String(PLACE_IDS.length), l: L.statPlaces },
     { v: String(WAREHOUSES.length), l: L.statWarehouses },
     { v: String(CARRIERS.length), l: L.statCarriers },
-    { v: "−30 %", l: L.statReturn },
+    { v: fill(d.map.discount, { pct: 30 }), l: L.statReturn },
     { v: String(LOCALES.length), l: L.statLanguages },
   ];
   const steps = [
@@ -74,7 +74,7 @@ export default async function Landing({ params }: PageProps<"/[lang]">) {
             <ThemeToggle />
             <Link
               href={app}
-              className="hidden h-9 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-sm font-semibold text-accent-ink transition hover:bg-accent-hover sm:inline-flex"
+              className="hidden h-10 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-sm font-semibold text-accent-ink transition hover:bg-accent-hover sm:inline-flex"
             >
               {L.ctaPrimary}
               <ArrowRight className="size-4" aria-hidden />
@@ -88,8 +88,9 @@ export default async function Landing({ params }: PageProps<"/[lang]">) {
         <section className="relative">
           <div className="grid-fade pointer-events-none absolute inset-0 -z-10 opacity-70" />
           <div className="pointer-events-none absolute -top-40 left-1/2 -z-10 size-[42rem] -translate-x-1/2 rounded-full bg-accent/10 blur-3xl" />
-          <div className="mx-auto grid max-w-7xl items-center gap-10 px-4 pt-10 pb-14 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:pt-16 lg:pb-20">
-            <div className="z-rise">
+          {/* grid-cols-1 (a minmax(0, 1fr) track) so the no-wrap eyebrow can't widen the column past a phone screen. */}
+          <div className="mx-auto grid max-w-7xl grid-cols-1 items-center gap-10 px-4 pt-10 pb-14 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:pt-16 lg:pb-20">
+            <div className="z-rise min-w-0">
               <p className="inline-flex max-w-full items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink-2 shadow-card">
                 <span className="relative flex size-2 shrink-0">
                   <span className="absolute inline-flex size-full animate-ping rounded-full bg-signal opacity-60" />

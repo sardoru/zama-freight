@@ -11,7 +11,7 @@ import { PLACE_IDS, PLACES, type PlaceId } from "@/data/places";
 import { fitsReturn, HOUR } from "@/data/seed";
 import type { GoodsType, Load, VehicleType } from "@/data/types";
 import { useI18n } from "@/i18n/client";
-import { needsEcmr, touchesZbe } from "@/lib/checks";
+import { needsEcmr, touchesZbe, touchesZfe } from "@/lib/checks";
 import { fromMadridInput, toMadridInput } from "@/lib/format";
 import { quote, suggestVehicle, VEHICLE_SPECS } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
@@ -113,11 +113,7 @@ export function PostLoad() {
     router.push(`/${lang}/app/loads?id=${l.id}`);
   };
 
-  const quick = [
-    { label: "+2 h", at: Math.ceil((now + 2 * HOUR) / QUARTER) * QUARTER },
-    { label: "+4 h", at: Math.ceil((now + 4 * HOUR) / QUARTER) * QUARTER },
-    { label: "+8 h", at: Math.ceil((now + 8 * HOUR) / QUARTER) * QUARTER },
-  ];
+  const quick = [2, 4, 8].map((h) => ({ label: `+${f.minutes(h * 60)}`, at: Math.ceil((now + h * HOUR) / QUARTER) * QUARTER }));
 
   return (
     <Page>
@@ -136,7 +132,8 @@ export function PostLoad() {
               <Button
                 variant="ghost"
                 size="md"
-                aria-label="⇅"
+                aria-label={d.post.swap}
+                title={d.post.swap}
                 className="justify-self-center"
                 onClick={() => {
                   setFrom(to);
@@ -151,8 +148,8 @@ export function PostLoad() {
           </Card>
 
           <Card className="space-y-4 p-4 sm:p-5">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Field label={d.post.goods} className="sm:col-span-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label={d.post.goods} className="sm:col-span-2">
                 <select
                   value={goods}
                   onChange={(e) => {
@@ -174,7 +171,8 @@ export function PostLoad() {
               <Field label={d.post.kg}>
                 <input type="number" inputMode="numeric" min={1} step={1} value={kg} onChange={(e) => setKg(Math.max(1, Number(e.target.value) || 1))} className={cn(inputClass, "tnum")} />
               </Field>
-              <Field label={d.post.pickup}>
+              {/* A row of its own: a date-time field needs ~230px before it cuts the time off. */}
+              <Field label={d.post.pickup} className="sm:col-span-2">
                 <input type="datetime-local" value={pickup} onChange={(e) => e.target.value && setPickup(e.target.value)} className={inputClass} />
               </Field>
             </div>
@@ -184,7 +182,7 @@ export function PostLoad() {
                   key={x.label}
                   type="button"
                   onClick={() => setPickup(toMadridInput(x.at))}
-                  className="rounded-lg border border-line bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink-2 transition hover:border-line-strong hover:text-ink"
+                  className="rounded-lg border border-line bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink-2 transition hover:border-line-strong hover:text-ink pointer-coarse:py-3"
                 >
                   {x.label} · {f.time(x.at)}
                 </button>
@@ -197,12 +195,13 @@ export function PostLoad() {
               </div>
               <Segmented value={vehicle} onChange={(v) => setPicked(v)} options={VEHICLE_TYPES.map((v) => ({ value: v, label: d.vehiclesShort[v], title: d.vehicles[v] }))} label={d.post.vehicle} />
               <p className="tnum mt-1.5 text-xs text-ink-3">
-                {d.vehicles[vehicle]} · ≤ {spec.pallets} {d.common.pallets.toLowerCase()} · ≤ {f.kg(spec.kg)}
+                {d.vehicles[vehicle]} · ≤ {n(d.common.palletsN, spec.pallets)} · ≤ {f.kg(spec.kg)}
               </p>
             </div>
             <div>
               <div className="mb-1 text-[0.8rem] font-semibold text-ink-2">{d.post.options}</div>
-              <div className="grid grid-cols-1 gap-0.5 sm:grid-cols-3">
+              {/* One switch per row until there's room for the whole label, surcharge included. */}
+              <div className="grid grid-cols-1 gap-0.5 2xl:grid-cols-3">
                 <Switch checked={express} onChange={setExpress} label={d.post.express} icon={<Zap className="size-4 text-signal" aria-hidden />} />
                 <Switch checked={tailLift} onChange={setTailLift} label={d.post.tailLift} />
                 <Switch checked={adr} onChange={setAdr} label={d.post.adr} icon={<CircleAlert className="size-4 text-warn" aria-hidden />} />
@@ -290,13 +289,19 @@ export function PostLoad() {
                   <p className="flex items-start gap-2 text-ink-2">
                     <FileCheck className="mt-0.5 size-4 shrink-0 text-blue" aria-hidden />
                     <span>
-                      {d.post.doc}: {needsEcmr({ from, to }) === "deca" ? d.ecmr.deca : d.ecmr.ecmr}
+                      {d.post.doc}: {d.ecmr[needsEcmr({ from, to })]}
                     </span>
                   </p>
                   {touchesZbe({ from, to }) ? (
                     <p className="flex items-start gap-2 text-ink-2">
                       <Leaf className="mt-0.5 size-4 shrink-0 text-green" aria-hidden />
                       <span>{d.post.zbeNote}</span>
+                    </p>
+                  ) : null}
+                  {touchesZfe({ from, to }) ? (
+                    <p className="flex items-start gap-2 text-ink-2">
+                      <Leaf className="mt-0.5 size-4 shrink-0 text-green" aria-hidden />
+                      <span>{d.checks.zfe}</span>
                     </p>
                   ) : null}
                 </div>
@@ -331,7 +336,7 @@ export function PostLoad() {
                     <li key={rt.id} className="rounded-xl border border-lime/40 bg-lime-soft/60 p-3">
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm font-bold text-ink">{CARRIER.get(rt.carrierId)?.name}</span>
-                        <Chip tone="lime">−{Math.round(rt.discount * 100)} %</Chip>
+                        <Chip tone="lime">{d.map.discount.replace("{{pct}}", String(Math.round(rt.discount * 100)))}</Chip>
                       </div>
                       <p className="mt-0.5 text-xs text-ink-2">
                         {place(rt.from)} → {place(rt.to)} · {f.time(rt.departAt)} · {n(d.map.freePallets, rt.freePallets)}

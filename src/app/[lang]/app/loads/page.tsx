@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { LoadBoard } from "@/components/screens/loads";
 import { isLocale } from "@/i18n/config";
 import { getDict } from "@/i18n/get-dict";
@@ -9,5 +10,10 @@ export async function generateMetadata({ params }: PageProps<"/[lang]/app/loads"
 }
 
 export default function Page() {
-  return <LoadBoard />;
+  // LoadBoard reads ?id= with useSearchParams, which needs a Suspense boundary on a prerendered route.
+  return (
+    <Suspense>
+      <LoadBoard />
+    </Suspense>
+  );
 }

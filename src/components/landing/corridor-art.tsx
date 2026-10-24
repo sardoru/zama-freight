@@ -146,7 +146,7 @@ export function CorridorArt({ lang, d }: { lang: Locale; d: Dict }) {
           <g className="art-minor" transform={`translate(${P.width - 230} ${P.height - 34})`}>
             <rect width={P.p([BOX[0] + 0.1236, 0])[0]} height="5" rx="2.5" fill="var(--z-ink-3)" />
             <text y="-8" className="art-label" fontSize="14" fill="var(--z-ink-3)">
-              10 km
+              {f.km(10)}
             </text>
           </g>
         </svg>

@@ -80,7 +80,7 @@ export function ThemeToggle({ className }: { className?: string }) {
       type="button"
       onClick={() => setPref(next)}
       className={cn(
-        "inline-flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-sm text-ink-2 transition hover:border-line-strong hover:text-ink",
+        "inline-flex h-10 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-sm text-ink-2 transition hover:border-line-strong hover:text-ink",
         className,
       )}
       aria-label={`${d.common.theme}: ${label}`}

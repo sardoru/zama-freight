@@ -4,12 +4,12 @@ import { CircleAlert, ShieldAlert, Timer, Truck, Warehouse as WarehouseIcon } fr
 import { useMemo, useState, type ReactNode } from "react";
 import { Page, PageHeader } from "@/components/app/shell";
 import { Button, Card, Chip, Empty, EcoBadge, inputClass, Progress, SectionTitle, Segmented, Sheet, Stat } from "@/components/ui";
-import { CARRIER, VEHICLE, VEHICLES } from "@/data/companies";
+import { CARRIER, CARRIERS, VEHICLE, VEHICLES } from "@/data/companies";
 import { CARRIES, dockStatus, driveMs, HOUR } from "@/data/seed";
 import type { Load, LoadStatus } from "@/data/types";
 import { WAREHOUSE } from "@/data/warehouses";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, CABOTAGE_USED, zbeProblem } from "@/lib/checks";
+import { CABOTAGE_LIMIT, cabotageUsed, hasDgtLabel, zbeNeedsAuth, zbeProblem } from "@/lib/checks";
 import { useMedia } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { useMarket } from "@/store/market";
@@ -34,6 +34,8 @@ export function Dispatch() {
   const [col, setCol] = useState<LoadStatus>("booked");
 
   const busy = useMemo(() => new Set(loads.filter((l) => (l.status === "assigned" || l.status === "inTransit") && l.vehicleId).map((l) => l.vehicleId)), [loads]);
+  // Cabotage this week, live: foreign carriers always, Spanish ones once they've worked inside France.
+  const cabotage = useMemo(() => CARRIERS.map((c) => ({ c, used: cabotageUsed(c.id, loads) })).filter((x) => x.c.country !== "ES" || x.used > 0), [loads]);
   const delivered = loads.filter((l) => l.status === "delivered");
   const moving = loads.filter((l) => l.status === "inTransit");
   const onTime = [...delivered.map((l) => (l.deliveredAt ?? 0) <= l.deliverBy), ...moving.map((l) => (l.departedAt ?? now) + driveMs(l) <= l.deliverBy)];
@@ -42,14 +44,19 @@ export function Dispatch() {
   const alerts: { id: string; tone: "danger" | "warn"; icon: ReactNode; text: string; loadId?: string }[] = [];
   for (const l of loads) {
     const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
-    if ((l.status === "assigned" || l.status === "booked") && v && zbeProblem(l, v))
-      alerts.push({ id: `z-${l.id}`, tone: "danger", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbe.replace("{{load}}", l.id).replace("{{plate}}", v.plate).replace("{{label}}", v.eco), loadId: l.id });
+    if ((l.status === "assigned" || l.status === "booked") && v) {
+      // The ZBE label rule depends on the date (B is barred from 2028), so it's checked on the market clock.
+      if (zbeProblem(l, v, now))
+        alerts.push({ id: `z-${l.id}`, tone: "danger", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbe.replace("{{load}}", l.id).replace("{{plate}}", v.plate).replace("{{label}}", v.eco), loadId: l.id });
+      else if (zbeNeedsAuth(l, v))
+        alerts.push({ id: `zf-${l.id}`, tone: "warn", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbeForeign.replace("{{load}}", l.id).replace("{{plate}}", v.plate), loadId: l.id });
+    }
     if (l.status === "booked" && !l.vehicleId && l.pickupAt - now < 2 * HOUR)
       alerts.push({ id: `v-${l.id}`, tone: "warn", icon: <Timer className="size-4" aria-hidden />, text: d.dispatch.alertNoVehicle.replace("{{load}}", l.id).replace("{{t}}", f.rel(l.pickupAt, now)), loadId: l.id });
   }
-  for (const [cid, used] of Object.entries(CABOTAGE_USED)) {
+  for (const { c, used } of cabotage) {
     if (used >= CABOTAGE_LIMIT - 1)
-      alerts.push({ id: `c-${cid}`, tone: used >= CABOTAGE_LIMIT ? "danger" : "warn", icon: <CircleAlert className="size-4" aria-hidden />, text: d.dispatch.alertCabotage.replace("{{carrier}}", CARRIER.get(cid)?.name ?? cid).replace("{{used}}", String(used)) });
+      alerts.push({ id: `c-${c.id}`, tone: used >= CABOTAGE_LIMIT ? "danger" : "warn", icon: <CircleAlert className="size-4" aria-hidden />, text: d.dispatch.alertCabotage.replace("{{carrier}}", c.name).replace("{{used}}", String(used)) });
   }
   for (const a of docks) {
     if (dockStatus(a, now) === "late")
@@ -127,9 +134,7 @@ export function Dispatch() {
             <p className="mt-2 text-sm text-ink-3">{d.dispatch.noAlerts}</p>
           )}
           <p className="mt-3 text-[0.7rem] text-ink-3">
-            {Object.entries(CABOTAGE_USED)
-              .map(([cid, used]) => `${CARRIER.get(cid)?.name} ${used}/${CABOTAGE_LIMIT}`)
-              .join(" · ")}
+            {d.dispatch.cabotageWeek} {cabotage.map(({ c, used }) => `${c.name} ${used}/${CABOTAGE_LIMIT}`).join(" · ")}
           </p>
         </Card>
       </div>
@@ -147,9 +152,13 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
   const advance = useMarket((s) => s.advance);
   const bookInstant = useMarket((s) => s.bookInstant);
   const fleet = l.carrierId ? VEHICLES.filter((v) => v.carrierId === l.carrierId && CARRIES[v.type].includes(l.vehicle)) : [];
-  const [vehicleId, setVehicleId] = useState(() => (fleet.find((v) => !busy.has(v.id)) ?? fleet[0])?.id ?? "");
+  // Only a free truck can be picked: if the chosen one gets another job meanwhile, fall back to the first free one.
+  const [picked, setPicked] = useState<string | null>(null);
+  const vehicleId = picked && !busy.has(picked) ? picked : (fleet.find((x) => !busy.has(x.id))?.id ?? "");
   const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
   const progress = l.status === "inTransit" && l.departedAt ? Math.min(1, (now - l.departedAt) / driveMs(l)) : null;
+  const lane = `${place(l.from)} → ${place(l.to)}`;
+  const sub = `${d.vehiclesShort[l.vehicle]} · ${d.common.palletsN.replace("{{n}}", String(l.pallets))} · ${l.status === "delivered" && l.deliveredAt ? f.time(l.deliveredAt) : d.dispatch.pickupIn.replace("{{t}}", f.rel(l.pickupAt, now))}`;
   return (
     <article className="rounded-xl border border-line bg-surface p-2.5 shadow-sm">
       <button type="button" onClick={onOpen} className="block w-full text-left">
@@ -157,16 +166,17 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
           <span className="font-mono text-[0.7rem] font-semibold text-ink-3">{l.id}</span>
           <span className="tnum text-[0.8rem] font-bold text-ink">{f.money(l.price ?? l.target)}</span>
         </div>
-        <div className="mt-0.5 truncate text-[0.85rem] font-bold text-ink">
-          {place(l.from)} → {place(l.to)}
+        {/* Two lines before an ellipsis, so the destination stays readable in narrow columns. */}
+        <div title={lane} className="mt-0.5 line-clamp-2 text-[0.85rem] leading-snug font-bold text-ink">
+          {lane}
         </div>
-        <div className="mt-0.5 truncate text-[0.7rem] text-ink-3">
-          {d.vehiclesShort[l.vehicle]} · {d.common.palletsN.replace("{{n}}", String(l.pallets))} · {l.status === "delivered" && l.deliveredAt ? f.time(l.deliveredAt) : d.dispatch.pickupIn.replace("{{t}}", f.rel(l.pickupAt, now))}
+        <div title={sub} className="mt-0.5 line-clamp-2 text-[0.7rem] text-ink-3">
+          {sub}
         </div>
         {l.carrierId ? <div className="mt-1 truncate text-[0.72rem] font-medium text-ink-2">{CARRIER.get(l.carrierId)?.name}</div> : null}
         {v ? (
           <div className="mt-1 flex items-center gap-1.5 text-[0.7rem] text-ink-3">
-            <EcoBadge label={v.eco} className="h-4 min-w-4 px-1 text-[0.55rem]" />
+            {hasDgtLabel(v) ? <EcoBadge label={v.eco} className="h-4 min-w-4 px-1 text-[0.55rem]" /> : null}
             <span className="font-mono">{v.plate}</span>
           </div>
         ) : null}
@@ -184,15 +194,27 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
       ) : null}
       {l.status === "booked" && fleet.length ? (
         <div className="mt-2 flex gap-1.5">
-          <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className={cn(inputClass, "h-8 min-w-0 flex-1 px-2 text-xs")} aria-label={d.dispatch.assignTo}>
+          <select
+            value={vehicleId}
+            onChange={(e) => setPicked(e.target.value)}
+            className={cn(inputClass, "h-8 min-w-0 flex-1 px-2 text-xs pointer-coarse:h-10")}
+            aria-label={d.dispatch.assignTo}
+          >
+            {/* Every truck is on a job: show a dash rather than a blank box until one comes back. */}
+            {vehicleId ? null : (
+              <option value="" disabled hidden>
+                —
+              </option>
+            )}
             {fleet.map((x) => (
-              <option key={x.id} value={x.id}>
-                {x.plate} · {x.eco}
+              <option key={x.id} value={x.id} disabled={busy.has(x.id)}>
+                {x.plate}
+                {hasDgtLabel(x) ? ` · ${x.eco}` : ""}
                 {busy.has(x.id) ? ` (${d.loads.vehicleBusy})` : ""}
               </option>
             ))}
           </select>
-          <Button size="sm" variant="primary" disabled={!vehicleId} onClick={() => assignVehicle(l.id, vehicleId)}>
+          <Button size="sm" variant="primary" disabled={!vehicleId} onClick={() => assignVehicle(l.id, vehicleId)} aria-label={d.loads.assign} title={d.loads.assign}>
             <Truck className="size-3.5" aria-hidden />
           </Button>
         </div>

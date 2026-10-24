@@ -1,7 +1,7 @@
 "use client";
 
 // Pieces of a load shared by the load board, dispatch and the post form.
-import { Check, CircleAlert, CircleCheck, FileCheck, Leaf, ShieldCheck } from "lucide-react";
+import { Check, CircleAlert, CircleCheck, FileCheck, Leaf, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { CARRIER, SHIPPER, VEHICLE } from "@/data/companies";
 import { route } from "@/data/network";
@@ -9,8 +9,10 @@ import { PLACES } from "@/data/places";
 import { driveMs } from "@/data/seed";
 import type { Bid, EcmrState, Load, ReturnTrip } from "@/data/types";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, CABOTAGE_USED, isCabotage, needsEcmr, touchesZbe, ZBE_OK } from "@/lib/checks";
+import { CABOTAGE_LIMIT, cabotageUsed, isCabotage, needsEcmr, touchesZbe, touchesZfe, zbeEndsSoon, zbeNeedsAuth, zbeProblem } from "@/lib/checks";
 import { cn } from "@/lib/utils";
+import { useMarket } from "@/store/market";
+import { useSimNow } from "@/store/use-sim-now";
 import { Chip, Progress, StatusChip } from "./ui";
 
 export function LoadCard({
@@ -54,7 +56,7 @@ export function LoadCard({
             {l.returnTripId ? <Chip tone="lime">{d.fleet.returnsTitle}</Chip> : null}
             {l.mine ? <Chip tone="neutral">{d.common.yours}</Chip> : null}
           </div>
-          <div className="mt-1.5 truncate text-[0.98rem] font-bold text-ink">
+          <div className="mt-1.5 text-[0.98rem] leading-snug font-bold text-pretty text-ink">
             {place(l.from)} <span className="text-ink-3">→</span> {place(l.to)}
           </div>
           <div className="mt-1 flex flex-wrap gap-x-2.5 gap-y-0.5 text-[0.75rem] text-ink-3">
@@ -98,52 +100,84 @@ export function LoadCard({
   );
 }
 
-type CheckTone = "ok" | "bad" | "info";
+type CheckTone = "ok" | "warn" | "bad" | "info";
+
+const CHECK_ICON: Record<CheckTone, string> = { ok: "text-green", warn: "text-warn", bad: "text-danger", info: "text-blue" };
 
 function CheckRow({ tone, icon, children }: { tone: CheckTone; icon?: ReactNode; children: ReactNode }) {
   return (
     <li className="flex items-start gap-2 text-[0.8rem] leading-snug">
-      <span className={cn("mt-0.5 shrink-0", tone === "ok" ? "text-green" : tone === "bad" ? "text-danger" : "text-blue")}>
-        {icon ?? (tone === "bad" ? <CircleAlert className="size-4" aria-hidden /> : <CircleCheck className="size-4" aria-hidden />)}
+      <span className={cn("mt-0.5 shrink-0", CHECK_ICON[tone])}>
+        {icon ??
+          (tone === "bad" ? (
+            <CircleAlert className="size-4" aria-hidden />
+          ) : tone === "warn" ? (
+            <TriangleAlert className="size-4" aria-hidden />
+          ) : (
+            <CircleCheck className="size-4" aria-hidden />
+          ))}
       </span>
-      <span className={cn("min-w-0", tone === "bad" ? "font-semibold text-danger" : "text-ink-2")}>{children}</span>
+      <span className={cn("min-w-0", tone === "bad" ? "font-semibold text-danger" : tone === "warn" ? "font-medium text-warn" : "text-ink-2")}>{children}</span>
     </li>
   );
 }
 
-/** ZBE, cabotage and the consignment note, for a load and (optionally) the carrier/vehicle on it. */
-export function ChecksList({ load, carrierId, vehicleId }: { load: Pick<Load, "from" | "to">; carrierId?: string; vehicleId?: string }) {
+/** Low-emission zones, cabotage and the consignment note, for a load and (optionally) the carrier/vehicle on it. */
+export function ChecksList({
+  load,
+  carrierId,
+  vehicleId,
+}: {
+  load: Pick<Load, "from" | "to"> & Partial<Pick<Load, "status" | "carrierId">>;
+  carrierId?: string;
+  vehicleId?: string;
+}) {
   const { d } = useI18n();
+  // Rules change with the date (the ZBE's 2028 phase), so they're checked on the market clock.
+  const now = useSimNow();
+  const loads = useMarket((s) => s.loads);
   const v = vehicleId ? VEHICLE.get(vehicleId) : undefined;
   const zbe = touchesZbe(load);
+  const zfe = touchesZfe(load);
   const carrier = carrierId ? CARRIER.get(carrierId) : undefined;
   const cab = isCabotage(load, carrierId);
-  const used = carrierId ? (CABOTAGE_USED[carrierId] ?? 0) : 0;
+  const used = carrierId ? cabotageUsed(carrierId, loads) : 0;
+  // A load this carrier already holds is one of the operations counted in `used`.
+  const counted = !!carrierId && load.carrierId === carrierId && !!load.status && load.status !== "open" && load.status !== "cancelled";
+  const full = counted ? used > CABOTAGE_LIMIT : used >= CABOTAGE_LIMIT;
   const doc = needsEcmr(load);
   const crosses = PLACES[load.from].country !== PLACES[load.to].country;
   return (
     <ul className="space-y-1.5">
       {zbe ? (
-        v ? (
-          ZBE_OK.has(v.eco) ? (
-            <CheckRow tone="ok" icon={<Leaf className="size-4" aria-hidden />}>
-              {d.checks.zbeOk.replace("{{label}}", v.eco)}
-            </CheckRow>
-          ) : (
-            <CheckRow tone="bad">{d.checks.zbeBad.replace("{{label}}", v.eco)}</CheckRow>
-          )
-        ) : (
+        !v ? (
           <CheckRow tone="info" icon={<Leaf className="size-4" aria-hidden />}>
             {d.checks.zbeNeed}
           </CheckRow>
+        ) : zbeNeedsAuth(load, v) ? (
+          <CheckRow tone="warn">{d.checks.zbeForeign}</CheckRow>
+        ) : zbeProblem(load, v, now) ? (
+          <CheckRow tone="bad">{d.checks.zbeBad.replace("{{label}}", v.eco)}</CheckRow>
+        ) : zbeEndsSoon(v.eco, now) ? (
+          <CheckRow tone="warn">{d.checks.zbeSoon.replace("{{label}}", v.eco)}</CheckRow>
+        ) : (
+          <CheckRow tone="ok" icon={<Leaf className="size-4" aria-hidden />}>
+            {d.checks.zbeOk.replace("{{label}}", v.eco)}
+          </CheckRow>
         )
-      ) : (
+      ) : null}
+      {zfe ? (
+        <CheckRow tone="info" icon={<Leaf className="size-4" aria-hidden />}>
+          {d.checks.zfe}
+        </CheckRow>
+      ) : null}
+      {!zbe && !zfe ? (
         <CheckRow tone="ok" icon={<Leaf className="size-4" aria-hidden />}>
           {d.checks.zbeNone}
         </CheckRow>
-      )}
+      ) : null}
       {cab && carrier ? (
-        used >= CABOTAGE_LIMIT ? (
+        full ? (
           <CheckRow tone="bad">{d.checks.cabotageFull.replace("{{carrier}}", carrier.name).replace("{{used}}", String(used))}</CheckRow>
         ) : (
           <CheckRow tone="ok" icon={<ShieldCheck className="size-4" aria-hidden />}>
@@ -161,7 +195,7 @@ export function ChecksList({ load, carrierId, vehicleId }: { load: Pick<Load, "f
         </CheckRow>
       ) : null}
       <CheckRow tone="info" icon={<FileCheck className="size-4" aria-hidden />}>
-        {d.checks.doc.replace("{{doc}}", doc === "deca" ? d.ecmr.deca : d.ecmr.ecmr)}
+        {d.checks.doc.replace("{{doc}}", d.ecmr[doc])}
       </CheckRow>
     </ul>
   );
@@ -178,7 +212,7 @@ export function EcmrTimeline({ load }: { load: Pick<Load, "from" | "to" | "ecmr"
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[0.8rem] font-semibold text-ink">{doc === "deca" ? d.ecmr.deca : d.ecmr.ecmr}</span>
+        <span className="text-[0.8rem] font-semibold text-ink">{d.ecmr[doc]}</span>
         <span className="text-[0.72rem] text-ink-3">{d.ecmr[load.ecmr]}</span>
       </div>
       <ol className="mt-2.5 grid grid-cols-4 gap-1">

@@ -37,20 +37,22 @@
   --z-ink-3: #5c6875;
   --z-line: #e0e3dc;
   --z-line-strong: #c6ccc3;
-  --z-accent: #0c8f81;
-  --z-accent-hover: #0a7a6e;
+  /* Text tokens clear 4.5:1 on white, the ground and their own -soft fills. */
+  --z-accent: #0a7a6e;
+  --z-accent-hover: #07685e;
   --z-accent-ink: #ffffff;
   --z-accent-soft: #d8f1ec;
   --z-accent-text: #07685e;
-  --z-signal: #e4620c;
-  --z-signal-soft: #fde6d4;
-  --z-lime: #4d8a0b;
+  --z-signal: #c2410c;
+  --z-signal-soft: #ffefe3;
+  --z-lime: #3f7209;
+  --z-lime-ink: #ffffff;
   --z-lime-soft: #e5f3d2;
   --z-violet: #6d3fd9;
   --z-violet-soft: #ece4fd;
   --z-green: #047857;
   --z-green-soft: #d6f3e6;
-  --z-warn: #a85f05;
+  --z-warn: #925305;
   --z-warn-soft: #fcefd2;
   --z-danger: #c81e1e;
   --z-danger-soft: #fde2e2;
@@ -84,6 +86,7 @@
   --z-signal: #ff8a3d;
   --z-signal-soft: #3a2112;
   --z-lime: #a3e635;
+  --z-lime-ink: #0f1a02;
   --z-lime-soft: #23300f;
   --z-violet: #a78bfa;
   --z-violet-soft: #241c3d;
@@ -123,6 +126,7 @@
     --z-signal: #ff8a3d;
     --z-signal-soft: #3a2112;
     --z-lime: #a3e635;
+    --z-lime-ink: #0f1a02;
     --z-lime-soft: #23300f;
     --z-violet: #a78bfa;
     --z-violet-soft: #241c3d;
@@ -161,6 +165,7 @@
   --color-signal: var(--z-signal);
   --color-signal-soft: var(--z-signal-soft);
   --color-lime: var(--z-lime);
+  --color-lime-ink: var(--z-lime-ink);
   --color-lime-soft: var(--z-lime-soft);
   --color-violet: var(--z-violet);
   --color-violet-soft: var(--z-violet-soft);

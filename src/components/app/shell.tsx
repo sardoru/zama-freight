@@ -87,7 +87,7 @@ function TopBar() {
   const { lang, d } = useI18n();
   return (
     <header className="glass relative z-30 flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-4">
-      <Link href={`/${lang}`} className="flex shrink-0 items-center gap-2" aria-label="Zama">
+      <Link href={`/${lang}`} className="-m-1.5 flex shrink-0 items-center gap-2 rounded-lg p-1.5" aria-label="Zama">
         <LogoMark className="size-7" />
         <span className="hidden text-[1.02rem] font-extrabold tracking-tight text-ink sm:inline">Zama</span>
       </Link>
@@ -132,13 +132,14 @@ function RoleSwitcher() {
           );
         })}
       </div>
-      <label className="relative inline-flex h-9 min-w-0 items-center rounded-lg border border-line bg-surface text-sm text-ink transition focus-within:border-accent lg:hidden">
+      <label className="relative inline-flex h-10 min-w-0 items-center rounded-lg border border-line bg-surface text-sm text-ink transition focus-within:border-accent lg:hidden">
         <Icon className="pointer-events-none absolute left-2.5 size-4 text-accent-text" aria-hidden />
         <span className="sr-only">{d.roles.youAre}</span>
+        {/* No outline-none: keyboard focus gets the global focus ring, not just a border tint. */}
         <select
           value={role}
           onChange={(e) => setRole(e.target.value as Role)}
-          className="h-full max-w-[9.5rem] min-w-0 cursor-pointer appearance-none truncate bg-transparent pr-2.5 pl-8 font-semibold outline-none"
+          className="h-full max-w-[11rem] min-w-0 cursor-pointer appearance-none truncate rounded-lg bg-transparent pr-2.5 pl-8 font-semibold"
         >
           {ROLES.map((r) => (
             <option key={r} value={r}>
@@ -168,11 +169,12 @@ function SimClock() {
       }}
       title={`${d.app.clock} · ${d.app.speed} ×${speed}`}
       aria-label={`${d.app.clock} ${now ? f.time(now) : ""}, ${d.app.speed} ×${speed}`}
-      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 text-sm text-ink transition hover:border-line-strong"
+      className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 text-sm text-ink transition hover:border-line-strong"
     >
       <Clock className="size-4 text-signal" aria-hidden />
       <span className="tnum font-mono text-[0.8rem] font-semibold">{now ? f.time(now) : "--:--"}</span>
-      <span className="tnum rounded bg-surface-2 px-1 font-mono text-[0.68rem] font-semibold text-ink-3">×{speed}</span>
+      {/* Hidden on the narrowest phones to leave room for the role name; the speed stays in the label. */}
+      <span className="tnum hidden rounded bg-surface-2 px-1 font-mono text-[0.68rem] font-semibold text-ink-3 min-[25rem]:inline">×{speed}</span>
     </button>
   );
 }
@@ -203,12 +205,12 @@ function AppMenu() {
         aria-label={d.common.menu}
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex size-9 items-center justify-center rounded-lg border border-line bg-surface text-ink-2 transition hover:border-line-strong hover:text-ink"
+        className="inline-flex size-10 items-center justify-center rounded-lg border border-line bg-surface text-ink-2 transition hover:border-line-strong hover:text-ink"
       >
         {open ? <X className="size-4" aria-hidden /> : <MoreHorizontal className="size-4" aria-hidden />}
       </button>
       {open ? (
-        <div className="absolute top-11 right-0 z-50 w-72 rounded-2xl border border-line bg-surface p-2 shadow-2xl">
+        <div className="absolute top-12 right-0 z-50 w-72 rounded-2xl border border-line bg-surface p-2 shadow-2xl">
           <div className="flex gap-2 p-1 sm:hidden">
             <LangSwitcher className="flex-1" />
             <ThemeToggle />
@@ -297,7 +299,7 @@ function BottomNav() {
 }
 
 function Toasts() {
-  const { t } = useI18n();
+  const { t, d } = useI18n();
   const toasts = useMarket((s) => s.toasts);
   const dismiss = useMarket((s) => s.dismissToast);
   return (
@@ -308,7 +310,12 @@ function Toasts() {
           <div key={x.id} className="z-rise pointer-events-auto flex w-full max-w-sm items-start gap-2.5 rounded-xl border border-line bg-surface px-3.5 py-3 text-sm text-ink shadow-2xl">
             <Icon className={cn("mt-0.5 size-4 shrink-0", x.tone === "warn" ? "text-warn" : x.tone === "info" ? "text-blue" : "text-green")} aria-hidden />
             <span className="min-w-0 flex-1">{t(x.key, x.vars)}</span>
-            <button type="button" onClick={() => dismiss(x.id)} className="text-ink-3 hover:text-ink" aria-label="×">
+            <button
+              type="button"
+              onClick={() => dismiss(x.id)}
+              className="-my-2 -mr-2 inline-flex size-10 shrink-0 items-center justify-center rounded-lg text-ink-3 hover:text-ink"
+              aria-label={d.common.close}
+            >
               <X className="size-4" aria-hidden />
             </button>
           </div>

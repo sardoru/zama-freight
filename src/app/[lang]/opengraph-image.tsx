@@ -1,7 +1,8 @@
 // The share card, one per language: the corridor from San Sebastián to Bayonne
 // drawn from our own coast outline and road graph, glowing load lanes, an
 // empty return trip, trucks on the motorway, and the headline in the reader's
-// language. Rendered at build time (satori + resvg via next/og).
+// language. Rendered by satori + resvg via next/og on the first request for a
+// language; generateImageMetadata gives each language its own alt text.
 import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,7 +16,6 @@ import { along } from "@/lib/geo";
 
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
-export const alt = "Zama · freight and warehouse marketplace for the Basque coast (San Sebastián, Pasaia, Irun, Biarritz–Bayonne)";
 
 const W = 760;
 // Framed so San Sebastián sits just right of the text column and Bayonne inside the edge.
@@ -43,12 +43,18 @@ const LABELS: { id: PlaceId; dx: number; dy: number }[] = [
   { id: "bayonne", dx: -30, dy: 16 },
 ];
 
-/** One card per language, rendered at build time. */
-export function generateStaticParams() {
-  return LOCALES.map((lang) => ({ lang }));
+/**
+ * One card per language, with og:image:alt / twitter:image:alt in that language
+ * (served at /{lang}/opengraph-image/card). Next passes plain params here, a
+ * promise to the image function below; at build time `lang` can be missing.
+ */
+export function generateImageMetadata({ params }: { params?: { lang?: string } }) {
+  const raw = params?.lang;
+  const lang: Locale = isLocale(raw) ? raw : "es";
+  return [{ id: "card", alt: getDict(lang).meta.ogAlt, size, contentType }];
 }
 
-export default async function Image({ params }: { params: Promise<{ lang: string }> }) {
+export default async function Image({ params }: { params: Promise<{ lang: string }>; id: Promise<string | number> }) {
   const { lang: raw } = await params;
   const lang: Locale = isLocale(raw) ? raw : "es";
   const d = getDict(lang);
