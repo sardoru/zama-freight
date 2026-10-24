@@ -36,12 +36,14 @@ test.describe("simulation notice", () => {
       expect(await meta('meta[property="og:title"]')).toBe(`${d.meta.ogTitle} · ${d.meta.siteName}`);
       expect(await meta('meta[property="og:description"]')).toBe(d.meta.description);
       expect(await meta('meta[name="twitter:title"]')).toBe(`${d.meta.ogTitle} · ${d.meta.siteName}`);
-      expect(await meta('meta[property="og:image:alt"]')).toMatch(/prototype/i);
+      // Per-language card alt (generateImageMetadata), which says "prototype" too.
+      expect(await meta('meta[property="og:image:alt"]')).toBe(d.meta.ogAlt);
+      expect(d.meta.ogAlt.toLowerCase()).toContain(d.meta.badge.split(" · ")[0].toLowerCase());
       // App screens carry it in the title template.
       await page.goto(`/${lang}/app/loads`);
       await expect(page).toHaveTitle(`${d.nav.loads} · ${d.meta.siteName}`);
       // The share card renders for every language.
-      const card = await page.request.get(`/${lang}/opengraph-image`);
+      const card = await page.request.get(`/${lang}/opengraph-image/card`);
       expect(card.status()).toBe(200);
       expect(card.headers()["content-type"]).toBe("image/png");
     });
@@ -55,7 +57,7 @@ test.describe("simulation notice", () => {
     await expect(band).toContainText(L.statPlaces);
     await expect(band).toContainText(L.statCarriers);
     await expect(band).toContainText(L.statReturn);
-    await expect(band).toContainText("−30 %");
+    await expect(band).toContainText(DICTS.en.map.discount.replace("{{pct}}", "30"));
     await expect(page.locator("main")).toContainText(L.mapCredit);
   });
 
@@ -96,7 +98,7 @@ test.describe("privacy and legal pages", () => {
       await expect(page.getByRole("heading", { level: 1 })).toHaveText(d.privacy.title);
       await expect(page).toHaveTitle(`${d.privacy.title} · ${d.meta.siteName}`);
       expect(await page.locator('meta[property="og:title"]').getAttribute("content")).toBe(`${d.privacy.title} · ${d.meta.siteName}`);
-      expect(await page.locator('meta[property="og:image"]').first().getAttribute("content")).toMatch(new RegExp(`/${lang}/opengraph-image`));
+      expect(await page.locator('meta[property="og:image"]').first().getAttribute("content")).toMatch(new RegExp(`/${lang}/opengraph-image/card$`));
       for (const host of ["tiles.openfreemap.org", "elevation-tiles-prod", "us-east-1", "zama-demo-v1", "zama-theme", "zama-lang"]) await expect(page.locator("main")).toContainText(host);
       await expect(page.locator("main")).toContainText("Cloudflare");
       await expect(page.locator("main")).toContainText("Vercel");
@@ -125,6 +127,11 @@ test.describe("privacy and legal pages", () => {
     await page.locator("header select").first().selectOption("fr");
     await expect(page).toHaveURL(/\/fr\/confidentialite$/);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(DICTS.fr.privacy.title);
+  });
+
+  test("the sitemap lists both pages in every language", async ({ request }) => {
+    const xml = await (await request.get("/sitemap.xml")).text();
+    for (const lang of LANGS) for (const slug of Object.values(DOC_SLUGS[lang])) expect(xml).toContain(`/${lang}/${slug}</loc>`);
   });
 
   test("other slugs are still a localized 404", async ({ request, page }) => {
@@ -191,7 +198,7 @@ test.describe("control names (#16, shell part)", () => {
     expect(name.startsWith(visible), `"${name}" starts with "${visible}"`).toBe(true);
 
     await page.goto("/fr/app/dispatch?as=dispatcher");
-    const assign = page.getByRole("button", { name: new RegExp(`^${fr.loads.assign} · ZM-\\d+$`) }).first();
+    const assign = page.getByRole("button", { name: fr.loads.assign, exact: true }).first();
     if (await assign.count()) {
       await assign.click();
       const toast = page.locator("[aria-live='polite'] button");

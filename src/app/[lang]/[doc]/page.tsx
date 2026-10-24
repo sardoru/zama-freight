@@ -35,8 +35,9 @@ export async function generateMetadata({ params }: PageProps<"/[lang]/[doc]">): 
   const d = getDict(lang);
   const text = d[doc];
   const title = `${text.title} · ${d.meta.siteName}`;
-  // A page's openGraph replaces the layout's whole object, so the share card is named again here.
-  const card = { url: `/${lang}/opengraph-image`, width: 1200, height: 630, alt: d.meta.ogAlt };
+  // A page's openGraph replaces the layout's whole object, so the share card is named again here
+  // (the per-language card from opengraph-image.tsx's generateImageMetadata, id "card").
+  const card = { url: `/${lang}/opengraph-image/card`, width: 1200, height: 630, alt: d.meta.ogAlt };
   return {
     title: text.title,
     description: text.lead,
