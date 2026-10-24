@@ -21,7 +21,7 @@ The UI speaks **Spanish, Basque, French, English and Russian**, has **light and 
 ![Zama share card](docs/screens/share-card-en.png)
 
 > **Prototype.** Every company, driver, plate and price is simulated; routes come from a hand-traced road graph and
-> are approximate. Nothing is sent to a server: the whole market runs in the browser.
+> are approximate. There is no backend; map tiles are fetched from OpenFreeMap and AWS, and the market runs in the browser.
 
 ---
 

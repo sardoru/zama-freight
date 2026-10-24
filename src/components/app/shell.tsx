@@ -4,6 +4,7 @@ import {
   CircleCheck,
   ClipboardList,
   Clock,
+  FileText,
   Home,
   Info,
   Map as MapIcon,
@@ -12,6 +13,7 @@ import {
   Radio,
   RotateCcw,
   Send,
+  ShieldCheck,
   TriangleAlert,
   Truck,
   Warehouse,
@@ -23,9 +25,10 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LangSwitcher } from "@/components/lang-switcher";
 import { LogoMark } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme";
-import { Spinner } from "@/components/ui";
+import { Spinner, useModalFocus } from "@/components/ui";
 import type { Role } from "@/data/types";
 import { useI18n } from "@/i18n/client";
+import { docHref } from "@/lib/doc-routes";
 import { cn } from "@/lib/utils";
 import { useMarket } from "@/store/market";
 import { refreshSimNow, useSimNow } from "@/store/use-sim-now";
@@ -83,16 +86,28 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function TopBar() {
-  const { lang, d } = useI18n();
+/** "Demo · simulated data", visible at every width (issue #3). */
+function DemoChip({ className }: { className?: string }) {
+  const { d } = useI18n();
   return (
-    <header className="glass relative z-30 flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-4">
-      <Link href={`/${lang}`} className="-m-1.5 flex shrink-0 items-center gap-2 rounded-lg p-1.5" aria-label="Zama">
+    <span className={cn("inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-md bg-signal-soft px-1.5 py-0.5 text-[0.65rem] leading-4 font-bold tracking-wide text-signal uppercase", className)}>
+      <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden />
+      <span className="min-w-0 truncate">{d.common.demoData}</span>
+    </span>
+  );
+}
+
+function TopBar() {
+  const { lang } = useI18n();
+  return (
+    // One row from md up; below that the controls fill the first row and the chip gets a row of its own.
+    <header className="glass relative z-30 grid shrink-0 grid-cols-[auto_minmax(0,1fr)] grid-rows-[3.5rem_auto] items-center gap-x-2 border-b border-line px-3 sm:px-4 md:grid-cols-[auto_auto_minmax(0,1fr)] md:grid-rows-[3.5rem]">
+      <Link href={`/${lang}`} className="col-start-1 row-start-1 -m-1.5 flex shrink-0 items-center gap-2 rounded-lg p-1.5" aria-label="Zama">
         <LogoMark className="size-7" />
         <span className="hidden text-[1.02rem] font-extrabold tracking-tight text-ink sm:inline">Zama</span>
       </Link>
-      <span className="hidden rounded-md bg-signal-soft px-1.5 py-0.5 text-[0.65rem] font-bold tracking-wide text-signal uppercase md:inline">{d.common.demoData}</span>
-      <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
+      <DemoChip className="col-span-2 col-start-1 row-start-2 -mt-1.5 mb-1.5 justify-self-start md:col-span-1 md:col-start-2 md:row-start-1 md:m-0" />
+      <div className="col-start-2 row-start-1 flex min-w-0 items-center justify-end gap-1.5 sm:gap-2 md:col-start-3">
         <RoleSwitcher />
         <SimClock />
         <LangSwitcher className="hidden sm:inline-flex" />
@@ -127,7 +142,8 @@ function RoleSwitcher() {
               )}
             >
               <I className="size-4" aria-hidden />
-              {d.roles[r]}
+              {/* Below xl only the current role is spelled out, so the demo chip fits next to the logo. */}
+              <span className={cn(role !== r && "sr-only xl:not-sr-only")}>{d.roles[r]}</span>
             </button>
           );
         })}
@@ -168,7 +184,8 @@ function SimClock() {
         refreshSimNow();
       }}
       title={`${d.app.clock} · ${d.app.speed} ×${speed}`}
-      aria-label={`${d.app.clock} ${now ? f.time(now) : ""}, ${d.app.speed} ×${speed}`}
+      // The name starts with what is on the button (WCAG 2.5.3), then says what it is.
+      aria-label={`${now ? f.time(now) : "--:--"} ×${speed} · ${d.app.clock}, ${d.app.speed}`}
       className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 text-sm text-ink transition hover:border-line-strong"
     >
       <Clock className="size-4 text-signal" aria-hidden />
@@ -183,41 +200,54 @@ function AppMenu() {
   const { lang, d } = useI18n();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
   const reset = useMarket((s) => s.reset);
+  // Same focus handling as the sheets: focus moves in, Tab stays in, Escape closes and returns to ⋯.
+  const { keepFocus } = useModalFocus(open, panel, () => setOpen(false), "first");
 
   useEffect(() => {
     if (!open) return;
-    const close = (e: MouseEvent | KeyboardEvent) => {
-      if (e instanceof KeyboardEvent ? e.key === "Escape" : !ref.current?.contains(e.target as Node)) setOpen(false);
+    // A press outside closes the menu and leaves focus where the user pressed.
+    const close = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) {
+        keepFocus();
+        setOpen(false);
+      }
     };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", close);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", close);
-    };
-  }, [open]);
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [open, keepFocus]);
 
+  const item = "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink";
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
         aria-label={d.common.menu}
         aria-expanded={open}
+        aria-haspopup="dialog"
         onClick={() => setOpen((o) => !o)}
         className="inline-flex size-10 items-center justify-center rounded-lg border border-line bg-surface text-ink-2 transition hover:border-line-strong hover:text-ink"
       >
         {open ? <X className="size-4" aria-hidden /> : <MoreHorizontal className="size-4" aria-hidden />}
       </button>
       {open ? (
-        <div className="absolute top-12 right-0 z-50 w-72 rounded-2xl border border-line bg-surface p-2 shadow-2xl">
+        <div ref={panel} role="dialog" aria-modal="true" aria-label={d.common.menu} tabIndex={-1} className="absolute top-12 right-0 z-50 w-72 rounded-2xl border border-line bg-surface p-2 shadow-2xl outline-none">
           <div className="flex gap-2 p-1 sm:hidden">
             <LangSwitcher className="flex-1" />
             <ThemeToggle />
           </div>
-          <Link href={`/${lang}`} onClick={() => setOpen(false)} className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink">
+          <Link href={`/${lang}`} onClick={() => setOpen(false)} className={item}>
             <Home className="size-4" aria-hidden />
             {d.nav.home}
+          </Link>
+          <Link href={docHref(lang, "privacy")} onClick={() => setOpen(false)} className={item}>
+            <ShieldCheck className="size-4" aria-hidden />
+            {d.privacy.title}
+          </Link>
+          <Link href={docHref(lang, "legal")} onClick={() => setOpen(false)} className={item}>
+            <FileText className="size-4" aria-hidden />
+            {d.legal.title}
           </Link>
           <button
             type="button"

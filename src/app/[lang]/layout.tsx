@@ -21,9 +21,11 @@ export async function generateMetadata({ params }: LayoutProps<"/[lang]">): Prom
   const { lang } = await params;
   if (!isLocale(lang)) return {};
   const d = getDict(lang);
+  // Every title, description and share text says "prototype" (issue #3): the market is simulated.
+  const ogTitle = `${d.meta.ogTitle} · ${d.meta.siteName}`;
   return {
     metadataBase: new URL(SITE_URL),
-    title: { default: d.meta.title, template: `%s · Zama` },
+    title: { default: d.meta.title, template: `%s · ${d.meta.siteName}` },
     description: d.meta.description,
     applicationName: "Zama",
     alternates: {
@@ -32,14 +34,14 @@ export async function generateMetadata({ params }: LayoutProps<"/[lang]">): Prom
     },
     openGraph: {
       type: "website",
-      siteName: "Zama",
+      siteName: d.meta.siteName,
       url: `/${lang}`,
-      title: d.meta.ogTitle,
+      title: ogTitle,
       description: d.meta.description,
       locale: OG_LOCALE[lang],
       alternateLocale: LOCALES.filter((l) => l !== lang).map((l) => OG_LOCALE[l]),
     },
-    twitter: { card: "summary_large_image", title: d.meta.ogTitle, description: d.meta.description },
+    twitter: { card: "summary_large_image", title: ogTitle, description: d.meta.description },
     formatDetection: { telephone: false },
   };
 }

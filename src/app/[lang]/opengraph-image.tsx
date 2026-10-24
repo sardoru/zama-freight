@@ -1,8 +1,11 @@
 // The share card, one per language: the corridor from San Sebastián to Bayonne
-// drawn from our own coast outline and road graph, glowing load lanes, an
-// empty return trip, trucks on the motorway, and the headline in the reader's
-// language. Rendered by satori + resvg via next/og on the first request for a
-// language; generateImageMetadata gives each language its own alt text.
+// drawn from our coast outline and road graph (derived from OpenStreetMap data),
+// glowing load lanes, an empty return trip, trucks on the motorway, and the
+// headline in the reader's language. A "prototype · simulated data" badge and
+// the map-data credit are part of the art, so a shared link never looks like a
+// live market (issue #3). Rendered by satori + resvg via next/og on the first
+// request for a language; generateImageMetadata gives each language its own alt
+// text (meta.ogAlt, which says "prototype" too).
 import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -70,7 +73,9 @@ export default async function Image({ params }: { params: Promise<{ lang: string
   ]);
 
   const title = d.meta.ogTitle;
-  const titleSize = title.length > 58 ? 52 : title.length > 48 ? 56 : 62;
+  // Cyrillic runs wider than Latin at the same size.
+  const span = title.length * (/[\u0400-\u04ff]/.test(title) ? 1.18 : 1);
+  const titleSize = span > 58 ? 46 : span > 48 ? 52 : 58;
   const hubs = (["donostia", "pasaia", "irun", "biarritz", "bayonne"] as PlaceId[]).map((h) => PLACES[h].names[lang].replace(/^(Puerto de|Port of|Port de|Порт) /, "")).join(" · ");
   const chips = [d.nav.loads, d.fleet.returnsTitle, d.nav.map, d.nav.warehouse];
   const roads = networkLines().filter((r) => r.road !== "urban");
@@ -161,7 +166,10 @@ export default async function Image({ params }: { params: Promise<{ lang: string
         {/* fade the map into the text side */}
         <div style={{ position: "absolute", left: mapLeft - 2, top: 0, width: 170, height: 630, display: "flex", backgroundImage: "linear-gradient(90deg, #071019, rgba(7,16,25,0))" }} />
 
-        <div style={{ position: "relative", display: "flex", flexDirection: "column", justifyContent: "space-between", width: 600, height: "100%", padding: "56px 0 52px 64px" }}>
+        {/* map-data credit, over the sea in the bottom-right corner */}
+        <div style={{ position: "absolute", right: 22, bottom: 16, display: "flex", fontSize: 15, fontWeight: 600, color: "#8a97a8" }}>{d.landing.mapCredit}</div>
+
+        <div style={{ position: "relative", display: "flex", flexDirection: "column", justifyContent: "space-between", width: 600, height: "100%", padding: "48px 0 44px 64px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
             <svg width="58" height="58" viewBox="0 0 32 32">
               <rect width="32" height="32" rx="9" fill="#2dd4bf" />
@@ -176,12 +184,35 @@ export default async function Image({ params }: { params: Promise<{ lang: string
           </div>
 
           <div style={{ display: "flex", flexDirection: "column" }}>
-            <div style={{ fontSize: titleSize, fontWeight: 800, lineHeight: 1.04, letterSpacing: -1.6, display: "flex" }}>{title}</div>
-            <div style={{ fontSize: 22, fontWeight: 600, color: "#a9b5c4", marginTop: 22, display: "flex" }}>{hubs}</div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                alignSelf: "flex-start",
+                gap: 10,
+                marginBottom: 22,
+                padding: "7px 16px 7px 13px",
+                borderRadius: 999,
+                background: "rgba(255,138,61,0.14)",
+                border: "1.5px solid rgba(255,138,61,0.55)",
+                color: "#ffb07a",
+                fontSize: 19,
+                fontWeight: 800,
+                letterSpacing: 1.2,
+                textTransform: "uppercase",
+              }}
+            >
+              <div style={{ width: 10, height: 10, borderRadius: 10, background: "#ff8a3d" }} />
+              {d.meta.badge}
+            </div>
+            <div style={{ fontSize: titleSize, fontWeight: 800, lineHeight: 1.04, letterSpacing: -1.6, display: "flex", maxWidth: 510 }}>{title}</div>
+            {/* narrower than the column, so it never runs under the San Sebastián label */}
+            <div style={{ fontSize: hubs.length > 50 ? 19 : 21, fontWeight: 600, lineHeight: 1.3, color: "#a9b5c4", marginTop: 18, display: "flex", maxWidth: 470 }}>{hubs}</div>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {/* kept clear of the map labels on the right (they overlapped in es and fr) */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, maxWidth: 440 }}>
               {chips.map((c, i) => (
                 <div
                   key={c}
