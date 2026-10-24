@@ -510,9 +510,9 @@ export default function CorridorMap(props: CorridorMapProps) {
 
   // MapLibre's stylesheet makes its container position:relative (unlayered CSS beats
   // Tailwind's layers), so the container fills a positioned wrapper instead. The zoom
-  // buttons sit above the credits' (i) button.
+  // buttons sit above the credits' (i) button (important, for the same reason).
   return (
-    <div className="absolute inset-0 [&_.maplibregl-ctrl-bottom-right]:bottom-9">
+    <div className="absolute inset-0 [&_.maplibregl-ctrl-bottom-right]:bottom-9!">
       <div ref={el} className="h-full w-full" />
     </div>
   );
