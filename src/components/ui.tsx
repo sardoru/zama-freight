@@ -54,6 +54,7 @@ const ECO: Record<EcoLabel, string> = {
   ECO: "bg-[linear-gradient(90deg,#1f9e4a_50%,#1f6fd6_50%)] text-white",
   C: "bg-[#1f9e4a] text-white",
   B: "bg-[#f1c40f] text-[#3b2f00]",
+  none: "bg-surface-3 text-ink-2",
 };
 
 /** The Spanish DGT environmental sticker. Only Spanish plates carry one: check hasDgtLabel(vehicle) first. */
@@ -61,10 +62,10 @@ export function EcoBadge({ label, className }: { label: EcoLabel; className?: st
   const { d } = useI18n();
   return (
     <span
-      title={d.common.ecoLabel.replace("{{label}}", label)}
+      title={label === "none" ? d.common.noEcoLabel : d.common.ecoLabel.replace("{{label}}", label)}
       className={cn("inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[0.62rem] font-extrabold tracking-tight shadow-sm ring-1 ring-black/10", ECO[label], className)}
     >
-      {label}
+      {label === "none" ? "–" : label}
     </span>
   );
 }

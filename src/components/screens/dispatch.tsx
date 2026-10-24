@@ -3,13 +3,15 @@
 import { CircleAlert, ShieldAlert, Timer, Truck, Warehouse as WarehouseIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { Page, PageHeader } from "@/components/app/shell";
+import { blockReason, labelText, useDeadlines, useRuleCtx, whereText } from "@/components/load-bits";
 import { Button, Card, Chip, Empty, EcoBadge, inputClass, Progress, SectionTitle, Segmented, Sheet, Stat } from "@/components/ui";
-import { CARRIER, CARRIERS, VEHICLE, VEHICLES } from "@/data/companies";
-import { CARRIES, dockStatus, driveMs, HOUR } from "@/data/seed";
+import { CARRIER, VEHICLE, VEHICLES } from "@/data/companies";
+import { CARRIES, dockStatus, driveMs, eligibleCarriers, HOUR } from "@/data/seed";
 import type { Load, LoadStatus } from "@/data/types";
 import { WAREHOUSE } from "@/data/warehouses";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, cabotageUsed, hasDgtLabel, zbeNeedsAuth, zbeProblem } from "@/lib/checks";
+import { ledgerAt, runVerdict } from "@/lib/cabotage";
+import { hasDgtLabel, zbeNeedsAuth, zbeProblem } from "@/lib/checks";
 import { useMedia } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { useMarket } from "@/store/market";
@@ -32,10 +34,10 @@ export function Dispatch() {
   const wide = useMedia("(min-width: 1280px)");
   const [open, setOpen] = useState<string | null>(null);
   const [col, setCol] = useState<LoadStatus>("booked");
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
 
   const busy = useMemo(() => new Set(loads.filter((l) => (l.status === "assigned" || l.status === "inTransit") && l.vehicleId).map((l) => l.vehicleId)), [loads]);
-  // Cabotage this week, live: foreign carriers always, Spanish ones once they've worked inside France.
-  const cabotage = useMemo(() => CARRIERS.map((c) => ({ c, used: cabotageUsed(c.id, loads) })).filter((x) => x.c.country !== "ES" || x.used > 0), [loads]);
   const delivered = loads.filter((l) => l.status === "delivered");
   const moving = loads.filter((l) => l.status === "inTransit");
   const onTime = [...delivered.map((l) => (l.deliveredAt ?? 0) <= l.deliverBy), ...moving.map((l) => (l.departedAt ?? now) + driveMs(l) <= l.deliverBy)];
@@ -44,19 +46,31 @@ export function Dispatch() {
   const alerts: { id: string; tone: "danger" | "warn"; icon: ReactNode; text: string; loadId?: string }[] = [];
   for (const l of loads) {
     const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
-    if ((l.status === "assigned" || l.status === "booked") && v) {
-      // The ZBE label rule depends on the date (B is barred from 2028), so it's checked on the market clock.
-      if (zbeProblem(l, v, now))
-        alerts.push({ id: `z-${l.id}`, tone: "danger", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbe.replace("{{load}}", l.id).replace("{{plate}}", v.plate).replace("{{label}}", v.eco), loadId: l.id });
-      else if (zbeNeedsAuth(l, v))
-        alerts.push({ id: `zf-${l.id}`, tone: "warn", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbeForeign.replace("{{load}}", l.id).replace("{{plate}}", v.plate), loadId: l.id });
-    }
+    const active = l.status === "assigned" || l.status === "booked";
+    // The ZBE depends on the date (B is banned from phase 2), so it's checked at the load's own time.
+    if (active && v && zbeProblem(l, v, l.departedAt ?? l.pickupAt))
+      alerts.push({ id: `z-${l.id}`, tone: "danger", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbe.replace("{{load}}", l.id).replace("{{plate}}", v.plate).replace("{{label}}", labelText(v.eco, d)), loadId: l.id });
+    else if (active && v && zbeNeedsAuth(l, v))
+      alerts.push({ id: `zf-${l.id}`, tone: "warn", icon: <ShieldAlert className="size-4" aria-hidden />, text: d.dispatch.alertZbeForeign.replace("{{load}}", l.id).replace("{{plate}}", v.plate), loadId: l.id });
+    // Licence, tachograph and cabotage for the vehicle on the job.
+    const reason = active && v ? blockReason(runVerdict(l, v, loads, rules), d, day) : null;
+    if (reason && v)
+      alerts.push({ id: `r-${l.id}`, tone: "danger", icon: <CircleAlert className="size-4" aria-hidden />, text: d.dispatch.alertRule.replace("{{load}}", l.id).replace("{{plate}}", v.plate).replace("{{reason}}", reason), loadId: l.id });
     if (l.status === "booked" && !l.vehicleId && l.pickupAt - now < 2 * HOUR)
       alerts.push({ id: `v-${l.id}`, tone: "warn", icon: <Timer className="size-4" aria-hidden />, text: d.dispatch.alertNoVehicle.replace("{{load}}", l.id).replace("{{t}}", f.rel(l.pickupAt, now)), loadId: l.id });
   }
-  for (const { c, used } of cabotage) {
-    if (used >= CABOTAGE_LIMIT - 1)
-      alerts.push({ id: `c-${c.id}`, tone: used >= CABOTAGE_LIMIT ? "danger" : "warn", icon: <CircleAlert className="size-4" aria-hidden />, text: d.dispatch.alertCabotage.replace("{{carrier}}", c.name).replace("{{used}}", String(used)) });
+  // Each foreign vehicle's cabotage window or cooling-off, per country.
+  const ledgers: { id: string; text: string; cooling: boolean }[] = [];
+  for (const v of VEHICLES) {
+    for (const country of ["ES", "FR"] as const) {
+      const lg = ledgerAt(v.id, country, now, loads, rules);
+      if (!lg) continue;
+      const where = whereText(country, d);
+      if (lg.coolingOffUntil && now <= lg.coolingOffUntil)
+        ledgers.push({ id: `${v.id}-${country}`, cooling: true, text: d.dispatch.cabotageCooling.replace("{{plate}}", v.plate).replace("{{where}}", where).replace("{{date}}", day(lg.coolingOffUntil)) });
+      else if (lg.windowEnds && now <= lg.windowEnds)
+        ledgers.push({ id: `${v.id}-${country}`, cooling: lg.used >= 3, text: d.dispatch.cabotageOpen.replace("{{plate}}", v.plate).replace("{{where}}", where).replace("{{used}}", String(lg.used)).replace("{{date}}", day(lg.windowEnds)) });
+    }
   }
   for (const a of docks) {
     if (dockStatus(a, now) === "late")
@@ -133,9 +147,20 @@ export function Dispatch() {
           ) : (
             <p className="mt-2 text-sm text-ink-3">{d.dispatch.noAlerts}</p>
           )}
-          <p className="mt-3 text-[0.7rem] text-ink-3">
-            {d.dispatch.cabotageWeek} {cabotage.map(({ c, used }) => `${c.name} ${used}/${CABOTAGE_LIMIT}`).join(" · ")}
-          </p>
+          <div className="mt-3 border-t border-line pt-2.5">
+            <h3 className="text-[0.72rem] font-bold text-ink-2">{d.dispatch.cabotageTitle}</h3>
+            {ledgers.length ? (
+              <ul className="mt-1 space-y-0.5 text-[0.7rem] text-ink-3">
+                {ledgers.map((x) => (
+                  <li key={x.id} className={cn("tnum", x.cooling && "text-warn")}>
+                    {x.text}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-[0.7rem] text-ink-3">{d.dispatch.cabotageQuiet}</p>
+            )}
+          </div>
         </Card>
       </div>
 
@@ -151,10 +176,18 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
   const assignVehicle = useMarket((s) => s.assignVehicle);
   const advance = useMarket((s) => s.advance);
   const bookInstant = useMarket((s) => s.bookInstant);
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
   const fleet = l.carrierId ? VEHICLES.filter((v) => v.carrierId === l.carrierId && CARRIES[v.type].includes(l.vehicle)) : [];
-  // Only a free truck can be picked: if the chosen one gets another job meanwhile, fall back to the first free one.
+  // Only a free truck that may legally run the job can be picked (licence, tachograph, cabotage); if the chosen one
+  // gets another job or becomes blocked meanwhile, fall back to the first usable one.
+  const blocked = new Map(l.status === "booked" ? fleet.map((v) => [v.id, blockReason(runVerdict(l, v, rules.loads, rules), d, day)]) : []);
+  const usable = (id: string) => !busy.has(id) && !blocked.get(id);
   const [picked, setPicked] = useState<string | null>(null);
-  const vehicleId = picked && !busy.has(picked) ? picked : (fleet.find((x) => !busy.has(x.id))?.id ?? "");
+  const vehicleId = picked && usable(picked) ? picked : (fleet.find((x) => usable(x.id))?.id ?? "");
+  // Nothing usable because of the rules: say why.
+  const reason = l.status === "booked" && !vehicleId ? (fleet.map((x) => blocked.get(x.id)).find(Boolean) ?? null) : null;
+  const bookable = l.status !== "open" || eligibleCarriers(l, { loads: rules.loads, at: l.pickupAt, anchor: rules.anchor }).length > 0;
   const v = l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined;
   const progress = l.status === "inTransit" && l.departedAt ? Math.min(1, (now - l.departedAt) / driveMs(l)) : null;
   const lane = `${place(l.from)} → ${place(l.to)}`;
@@ -188,7 +221,7 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
         ) : null}
       </button>
       {l.status === "open" ? (
-        <Button size="sm" variant="secondary" onClick={() => bookInstant(l.id)} className="mt-2 w-full">
+        <Button size="sm" variant="secondary" disabled={!bookable} onClick={() => bookInstant(l.id)} className="mt-2 w-full">
           {d.loads.bookNow.replace("{{amount}}", f.money(l.target))}
         </Button>
       ) : null}
@@ -200,17 +233,18 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
             className={cn(inputClass, "h-8 min-w-0 flex-1 px-2 text-xs pointer-coarse:h-10")}
             aria-label={d.dispatch.assignTo}
           >
-            {/* Every truck is on a job: show a dash rather than a blank box until one comes back. */}
+            {/* Every truck is on a job (or blocked): show a dash rather than a blank box. */}
             {vehicleId ? null : (
               <option value="" disabled hidden>
                 —
               </option>
             )}
             {fleet.map((x) => (
-              <option key={x.id} value={x.id} disabled={busy.has(x.id)}>
+              <option key={x.id} value={x.id} disabled={busy.has(x.id) || !!blocked.get(x.id)}>
                 {x.plate}
-                {hasDgtLabel(x) ? ` · ${x.eco}` : ""}
+                {hasDgtLabel(x) ? ` · ${labelText(x.eco, d)}` : ""}
                 {busy.has(x.id) ? ` (${d.loads.vehicleBusy})` : ""}
+                {blocked.get(x.id) ? ` (${blocked.get(x.id)})` : ""}
               </option>
             ))}
           </select>
@@ -219,6 +253,7 @@ function DispatchCard({ load: l, now, busy, onOpen }: { load: Load; now: number;
           </Button>
         </div>
       ) : null}
+      {reason ? <p className="mt-1 text-[0.68rem] leading-snug font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</p> : null}
       {l.status === "assigned" ? (
         <Button size="sm" variant="primary" onClick={() => advance(l.id)} className="mt-2 w-full">
           {d.dispatch.depart}

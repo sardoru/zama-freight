@@ -5,6 +5,7 @@
 // (OSRM / Valhalla): close at regional zoom, approximate street by street.
 import { cumulative, smooth, type LngLat } from "@/lib/geo";
 import { PLACES, type PlaceId } from "./places";
+import { isTolled, type TollRoad } from "./tolls";
 
 type Junction =
   | "j_zubieta" | "j_anorga" | "j_errekalde" | "j_amara" | "j_martutene" | "j_intxaurrondo" | "j_herrera"
@@ -60,7 +61,9 @@ const E = (a: NodeId, b: NodeId, road: RoadClass, ref: string, via: LngLat[] = [
 
 const EDGES: EdgeSpec[] = [
   // GI-20, the free motorway through the south of Donostia, then the tolled
-  // AP-8 from Errenteria to the Bidasoa
+  // AP-8 from Errenteria to the Bidasoa. Bidegi prices every entry from the
+  // Donostia side (GI-20, Pasaia, Errenteria) as its "Donostia E" entry, so
+  // the toll is charged from Donostia E (data/tolls.ts).
   E("j_zubieta", "j_anorga", "motorway", "GI-20", [[-2.029, 43.2885]]),
   E("j_anorga", "j_errekalde", "motorway", "GI-20"),
   E("j_errekalde", "j_amara", "motorway", "GI-20", [[-1.9925, 43.2985]]),
@@ -147,6 +150,14 @@ for (const edge of edges) {
   }
 }
 
+/** One stretch of a toll motorway: where the route joins it and where it leaves. */
+export interface TollLeg {
+  road: TollRoad;
+  entry: NodeId;
+  exit: NodeId;
+  km: number;
+}
+
 export interface Route {
   from: PlaceId;
   to: PlaceId;
@@ -157,9 +168,13 @@ export interface Route {
   minutes: number;
   roads: string[];
   crossesBorder: boolean;
-  /** Km on toll motorways (AP-8 east of Errenteria, A-63). */
+  /** Km on legs that pay a toll (AP-8 from Donostia E, A-63). */
   tollKm: number;
+  /** The toll legs, priced by entry and exit in lib/pricing.ts. */
+  tolls: TollLeg[];
 }
+
+const tollRoadOf = (e: EdgeSpec): TollRoad | null => (e.road !== "motorway" ? null : e.ref === "AP-8" || e.ref === "A-63" ? e.ref : null);
 
 const cache = new Map<string, Route>();
 
@@ -197,16 +212,24 @@ export function route(from: PlaceId, to: PlaceId): Route {
   const raw: LngLat[] = [];
   let meters = 0;
   let seconds = 0;
-  let tollMeters = 0;
   const roads: string[] = [];
+  const legs: { road: TollRoad; entry: NodeId; exit: NodeId; meters: number }[] = [];
   for (const { edge, forward } of steps) {
     const pts = forward ? edge.path : [...edge.path].reverse();
     raw.push(...(raw.length ? pts.slice(1) : pts));
     meters += edge.meters;
     seconds += edge.seconds;
-    if (edge.ref === "A-63" || (edge.ref === "AP-8" && edge.road === "motorway")) tollMeters += edge.meters;
     if (roads[roads.length - 1] !== edge.ref) roads.push(edge.ref);
+    const road = tollRoadOf(edge);
+    const [a, b] = forward ? [edge.a, edge.b] : [edge.b, edge.a];
+    const last = legs[legs.length - 1];
+    if (road && last && last.road === road && last.exit === a) {
+      last.exit = b;
+      last.meters += edge.meters;
+    } else if (road) legs.push({ road, entry: a, exit: b, meters: edge.meters });
   }
+  const tolls: TollLeg[] = legs.filter((l) => isTolled(l.road, l.entry, l.exit)).map((l) => ({ road: l.road, entry: l.entry, exit: l.exit, km: Math.round(l.meters / 100) / 10 }));
+  const tollMeters = legs.filter((l) => isTolled(l.road, l.entry, l.exit)).reduce((s, l) => s + l.meters, 0);
   const path = smooth(raw.length ? raw : [PLACES[from].lnglat, PLACES[to].lnglat], 2);
   const result: Route = {
     from,
@@ -219,6 +242,7 @@ export function route(from: PlaceId, to: PlaceId): Route {
     roads,
     crossesBorder: PLACES[from].country !== PLACES[to].country,
     tollKm: Math.round(tollMeters / 100) / 10,
+    tolls,
   };
   cache.set(key, result);
   return result;

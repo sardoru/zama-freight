@@ -1,5 +1,7 @@
 // The demo day, built relative to the moment the demo opens (t0), so trucks
 // are already on the road and pickups are always "in a few hours".
+import { cabotageCheck } from "@/lib/cabotage";
+import { licenceProblems } from "@/lib/checks";
 import { haversine } from "@/lib/geo";
 import { quote, VEHICLE_SPECS } from "@/lib/pricing";
 import { hash, rng } from "@/lib/random";
@@ -7,7 +9,7 @@ import { CARRIERS, ME, VEHICLE, VEHICLES } from "./companies";
 import { route } from "./network";
 import { PLACES, type PlaceId } from "./places";
 import { WAREHOUSES } from "./warehouses";
-import type { Bid, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType } from "./types";
+import type { Bid, Carrier, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType } from "./types";
 
 export const MIN = 60_000;
 export const HOUR = 60 * MIN;
@@ -140,9 +142,42 @@ export function buildLoads(t0: number): Load[] {
 /** Can this vehicle take a load of this type and weight? */
 export const canCarry = (v: Pick<Vehicle, "type">, type: VehicleType, kg = 0) => CARRIES[v.type].includes(type) && VEHICLE_SPECS[v.type].kg >= kg;
 
-/** Carriers that can serve a load type and weight (have at least one vehicle for it). */
-export function eligibleCarriers(vehicle: VehicleType, kg = 0) {
-  return CARRIERS.filter((c) => VEHICLES.some((v) => v.carrierId === c.id && canCarry(v, vehicle, kg)));
+/** A job to staff: its vehicle type, weight and lane, and optionally its times (for cabotage). */
+export type EligibilityJob = Pick<Load, "vehicle" | "from" | "to"> & Partial<Pick<Load, "id" | "kg" | "pickupAt" | "departedAt">>;
+
+/** The market as the cabotage ledger needs it (lib/cabotage.ts). */
+export interface EligibilityContext {
+  loads: Load[];
+  at: number;
+  /** The moment the demo opened (historyAnchor). */
+  anchor: number;
+}
+
+/**
+ * Carriers that can serve a job: at least one vehicle that carries its type and
+ * weight and may legally run it. Given a load, cross-border and cabotage jobs
+ * need a Community licence above 2.5 t and, for light vans, a tachograph from
+ * 1-7-2026 (lib/checks.ts); with `ctx` as well, that vehicle's cabotage ledger
+ * must allow it (lib/cabotage.ts). Given only a type and weight, the vehicles
+ * alone are checked.
+ */
+export function eligibleCarriers(vehicle: VehicleType, kg?: number): Carrier[];
+export function eligibleCarriers(job: EligibilityJob, ctx?: EligibilityContext): Carrier[];
+export function eligibleCarriers(job: VehicleType | EligibilityJob, arg?: number | EligibilityContext): Carrier[] {
+  const lane = typeof job === "string" ? null : job;
+  const type = typeof job === "string" ? job : job.vehicle;
+  const kg = typeof job === "string" ? (typeof arg === "number" ? arg : 0) : (job.kg ?? 0);
+  const ctx = typeof arg === "object" ? arg : undefined;
+  const at = lane?.departedAt ?? lane?.pickupAt ?? ctx?.at ?? Date.now();
+  return CARRIERS.filter((c) =>
+    VEHICLES.some((v) => {
+      if (v.carrierId !== c.id || !canCarry(v, type, kg)) return false;
+      if (!lane) return true;
+      if (licenceProblems(c, v, lane, at).length) return false;
+      if (!ctx) return true;
+      return !cabotageCheck({ id: lane.id ?? "job", from: lane.from, to: lane.to, pickupAt: at, departedAt: lane.departedAt }, v.id, ctx.loads, { anchor: ctx.anchor }).block;
+    }),
+  );
 }
 
 export function vehicleFor(carrierId: string, type: VehicleType, kg = 0) {
