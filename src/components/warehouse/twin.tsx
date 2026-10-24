@@ -9,7 +9,7 @@
 // something that casts one has moved.
 import { Grid, OrbitControls } from "@react-three/drei";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, type ReactNode } from "react";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { countAge, SKU } from "@/data/warehouses";
@@ -37,6 +37,8 @@ export interface TwinProps {
   focusKey: number;
   /** Market time, for which doors have a truck at them. */
   now: number;
+  /** Shown inside the <canvas> by browsers that can't draw it. */
+  fallback?: ReactNode;
 }
 
 // Phones and tablets: fewer pixels, no MSAA and a smaller shadow map. The GPU is the
@@ -560,6 +562,31 @@ function CameraRig({
   return null;
 }
 
+/**
+ * three r186 keeps one DFG lookup texture for every renderer and never disposes
+ * it, while each renderer that uploads it adds a "dispose" listener closing over
+ * its GL state: every twin left its renderer and canvas reachable (~0.35 MB a
+ * visit). Disposing that texture when the twin goes away releases them; the next
+ * renderer uploads it again.
+ */
+function ReleaseSharedTextures() {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const shared = useRef<THREE.Texture | null>(null);
+  useFrame(() => {
+    if (shared.current) return;
+    scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
+        const lut = (gl.properties.get(mat) as { uniforms?: { dfgLUT?: { value: unknown } } }).uniforms?.dfgLUT?.value;
+        if (lut instanceof THREE.Texture) shared.current = lut;
+      }
+    });
+  });
+  useEffect(() => () => shared.current?.dispose(), []);
+  return null;
+}
+
 export default function Twin(props: TwinProps) {
   const { warehouse: w, dark, onSelect } = props;
   // Stable for the same reason as the pallet handlers: a new Canvas callback is a store update, and that draws a frame.
@@ -585,6 +612,7 @@ export default function Twin(props: TwinProps) {
   return (
     <div ref={box} className="size-full">
       <Canvas
+        fallback={props.fallback}
         shadows={SHADOWS}
         dpr={PHONE ? [1, 1.5] : [1, 2]}
         // Robots move every frame; without them a frame is drawn only when something invalidates it.
@@ -641,6 +669,7 @@ export default function Twin(props: TwinProps) {
         {props.showRobots ? <Robots w={w} dark={dark} ex={ex} /> : null}
         <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.08} maxPolarAngle={Math.PI / 2.08} minDistance={6} maxDistance={size * 3} target={[(L.width - STAGING) / 2 + 2, 2, L.depth / 2]} />
         <CameraRig w={w} bins={props.bins} explode={props.explode} resetKey={props.resetKey} focusLoc={props.focusLoc} focusKey={props.focusKey} controls={controls} />
+        <ReleaseSharedTextures />
       </Canvas>
     </div>
   );

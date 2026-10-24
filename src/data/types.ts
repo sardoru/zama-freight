@@ -21,10 +21,28 @@ export type GoodsType =
 
 export type LoadStatus = "open" | "booked" | "assigned" | "inTransit" | "delivered" | "cancelled";
 
-/** Spanish DGT environmental label (Donostia's ZBE admits 0, ECO and C). */
-export type EcoLabel = "0" | "ECO" | "C" | "B";
+/**
+ * Spanish DGT environmental label (distintivo ambiental). "none" is a vehicle
+ * too old for any label. Donostia's ZBE rules by label live in lib/checks.ts.
+ * Foreign-plated vehicles carry the DGT class they would be given (they file a
+ * declaration instead of showing a sticker).
+ */
+export type EcoLabel = "0" | "ECO" | "C" | "B" | "none";
 
 export type EcmrState = "none" | "draft" | "shipper" | "carrier" | "delivered";
+
+export type Country = "ES" | "FR" | "LT";
+
+/**
+ * The operating licence, as the carrier's own country names it:
+ *  • MDL: Spanish authorisation for light vehicles (≤ 3.5 t), Spain only.
+ *  • MDP: Spanish authorisation for heavy vehicles, Spain only.
+ *  • LTI: French licence de transport intérieur (≤ 3.5 t), France only.
+ *  • community: EU Community licence (Reg. 1072/2009, art. 4), issued by the
+ *    home country (licencia comunitaria, licence communautaire, Bendrijos
+ *    licencija). Needed for international jobs and cabotage.
+ */
+export type Licence = "MDL" | "MDP" | "LTI" | "community";
 
 export interface Shipper {
   id: string;
@@ -36,12 +54,11 @@ export interface Shipper {
 export interface Carrier {
   id: string;
   name: string;
-  country: "ES" | "FR" | "LT";
+  country: Country;
   base: PlaceId;
   rating: number;
   jobs: number;
-  /** MDL ≤3.5 t national, MDP heavy national, community = EU licence (cross-border). */
-  licence: "MDL" | "MDP" | "community";
+  licence: Licence;
   languages: Locale[];
   founded: number;
 }
@@ -56,13 +73,33 @@ export interface Driver {
 export interface Vehicle {
   id: string;
   carrierId: string;
+  /** Visibly fictional ("DEMO-…"); never a real registration format. */
   plate: string;
   type: VehicleType;
   eco: EcoLabel;
   driverId: string;
   home: PlaceId;
+  /** Maximum authorised mass (MMA / PTAC), kg. Decides the licence and tachograph rules. */
+  mma: number;
+  /** Fitted with a tachograph. Every vehicle over 3.5 t has one; light vans only if fitted. */
+  tachograph: boolean;
+  /** Donostia ZBE authorisation for regular deliveries (ordinance art. 8.3, 3.2 f), phase 1 only. */
+  zbeDeliveryAuth?: boolean;
   /** Electric drivetrain (shown on the map and in ZBE checks). */
   electric?: boolean;
+}
+
+/**
+ * What a vehicle did before the demo opened, for the cabotage ledger:
+ * "international" = the last unloading of a laden international carriage in
+ * `country`; "cabotage" = a cabotage operation unloaded in `country`.
+ * `daysAgo` counts back from the moment the demo opened.
+ */
+export interface VehicleEvent {
+  vehicleId: string;
+  kind: "international" | "cabotage";
+  country: Country;
+  daysAgo: number;
 }
 
 export interface Load {

@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
-import { MapScreen } from "@/components/map/map-screen";
 import { isLocale } from "@/i18n/config";
 import { getDict } from "@/i18n/get-dict";
 
@@ -9,11 +7,8 @@ export async function generateMetadata({ params }: PageProps<"/[lang]/app">): Pr
   return isLocale(lang) ? { title: getDict(lang).nav.map } : {};
 }
 
+// The live map is drawn by the app layout (MapHost), which keeps it mounted while
+// the other screens are open; this route only has to exist and name the page.
 export default function Page() {
-  // MapScreen reads ?focus= with useSearchParams, which needs a Suspense boundary on a prerendered route.
-  return (
-    <Suspense>
-      <MapScreen />
-    </Suspense>
-  );
+  return null;
 }

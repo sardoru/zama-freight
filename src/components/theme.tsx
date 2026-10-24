@@ -4,12 +4,9 @@ import { Monitor, Moon, Sun } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import { useI18n } from "@/i18n/client";
 import { cn } from "@/lib/utils";
+import { THEME_KEY } from "./theme-script";
 
-export const THEME_KEY = "zama-theme";
 type Pref = "light" | "dark" | "system";
-
-/** Runs before first paint (inlined in <head>) so the page never flashes the wrong theme. */
-export const themeScript = `try{var t=localStorage.getItem("${THEME_KEY}");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`;
 
 const EVENT = "zama-theme-change";
 

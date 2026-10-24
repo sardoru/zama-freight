@@ -3,6 +3,10 @@
 // hillshaded relief from the Mapzen/AWS terrain tiles, motorway refs, and
 // place names in the reader's language. Logistics land (industrial, port,
 // railway) is tinted violet like the warehouses on top of it.
+//
+// The sources carry no attribution strings: the credits (OpenStreetMap,
+// OpenFreeMap, OpenMapTiles and one line per terrain dataset) are drawn by the
+// screen from the dictionaries, see credits.tsx.
 import type { ExpressionSpecification, LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { ADOUR, BIDASOA, COAST, LAND, URUMEA } from "@/data/coast";
 import type { Locale } from "@/i18n/config";
@@ -11,7 +15,6 @@ import type { Lighting } from "@/lib/sun";
 const OMT_TILEJSON = "https://tiles.openfreemap.org/planet";
 const GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
 const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
-const DEM_ATTRIBUTION = '<a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noreferrer">Terrain: Mapzen, AWS Open Data</a>';
 
 interface Palette {
   bg: string;
@@ -127,7 +130,7 @@ export function lightSpec(l: Lighting): NonNullable<StyleSpecification["light"]>
 export const skySpec = sky;
 
 const demSources = {
-  dem: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15, attribution: DEM_ATTRIBUTION },
+  dem: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
   terrain: { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 15 },
 } as const;
 
@@ -300,7 +303,7 @@ export function buildStyle({ dark, lang, lighting, buildings, terrain }: StyleOp
     name: dark ? "Zama dark" : "Zama light",
     glyphs: GLYPHS,
     sources: {
-      omt: { type: "vector", url: OMT_TILEJSON, attribution: '<a href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> <a href="https://www.openmaptiles.org/" target="_blank" rel="noreferrer">© OpenMapTiles</a> Data from <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>' },
+      omt: { type: "vector", url: OMT_TILEJSON },
       ...demSources,
     },
     light: lightSpec(lighting),

@@ -10,7 +10,7 @@ Zama is a working prototype of a freight and warehouse marketplace for the 55 km
 
 | Role | What they do in Zama |
 | --- | --- |
-| **Shipper** (*cargador*) | Post a load, get an instant fair price, compare carrier bids, accept one, or book an empty return trip 25–35 % cheaper. |
+| **Shipper** (*cargador*) | Post a load, get an instant demo price, compare carrier bids, accept one, or book an empty return trip 25–35 % cheaper. |
 | **Carrier** (*transportista*) | Bid on loads with a vehicle from their fleet, take instant-price loads, post their empty way home as a return trip. |
 | **Dispatcher** (*jefe de tráfico*) | Watch every truck live on a 3D map, assign vehicles, depart and deliver, clear compliance alerts. |
 | **Warehouse** (*almacén*) | Run six warehouses as 3D digital twins: stock, slotting, cycle counts, dock-door bookings, cross-dock. |
@@ -21,7 +21,7 @@ The UI speaks **Spanish, Basque, French, English and Russian**, has **light and 
 ![Zama share card](docs/screens/share-card-en.png)
 
 > **Prototype.** Every company, driver, plate and price is simulated; routes come from a hand-traced road graph and
-> are approximate. Nothing is sent to a server: the whole market runs in the browser.
+> are approximate. There is no backend; map tiles are fetched from OpenFreeMap and AWS, and the market runs in the browser.
 
 ---
 
@@ -52,15 +52,24 @@ underneath: streets, land use and 3D buildings lit by the sun.
 
 ### Marketplace
 
-- **Instant fair price** for every lane and vehicle, shown before anyone bids: handling + distance + tolls + border
-  handling + extras (express +25 %, tail-lift +€18, ADR +15 %), with a market range and €/km
-  (`src/lib/pricing.ts`, a hand-calibrated demo model, not a tariff). Tolls are charged on the AP-8 east of Errenteria
-  and on the A-63, as a per-km stand-in for their plaza tolls; the free GI-20 ring through Donostia is not tolled, and
-  Gipuzkoa's HGV charge on the N-I / A-15 is not modelled.
+- **Instant demo price** for every lane and vehicle, shown before anyone bids. It is a demo estimate, not a market rate:
+  no market data feeds it, and every price on Post, the load board and the return-trip cards says so. The breakdown
+  adds up to the price (`src/lib/pricing.ts`):
+  - handling and distance: Zama's hand-calibrated demo model;
+  - tolls: the published tariffs by entry, exit and vehicle class (`src/data/tolls.ts`), shown leg by leg with the
+    operator and tariff year. The AP-8 uses Bidegi's 2026 tariffs: the free GI-20 ring through Donostia isn't tolled,
+    and every entry from the Donostia side (the GI-20, Pasaia, Errenteria) pays Bidegi's "Donostia E" fare. The A-63
+    uses ASF's grid of 1 February 2024, the newest per-station grid we could verify. Refresh Bidegi every 1 January
+    and ASF every 1 February, and add Gipuzkoa's N-I / A-15 heavy-vehicle charge before routing inland;
+  - surcharges, each labelled a demo assumption: cross-border €28 (there is no customs step inside the EU), express
+    +25 %, tail-lift +€18, ADR +15 %;
+  - a demo range (−12 % / +14 %) and €/km. Empty return trips are priced at 68 % of the instant price, also a demo
+    assumption.
 - **Two ways to book**: *take bids* (carriers send prices; the shipper accepts) or *instant price* (first carrier to
-  accept; *Book now* goes to the best-rated carrier with a truck free for the job).
+  accept; *Book now* goes to the best-rated carrier with a truck free for the job, and is off when no carrier may
+  legally run it).
 - **Bids** with vehicle, driver, DGT eco label, pickup ETA and a note; the carrier sees whether a bid is strong or weak
-  against the fair range.
+  against the demo range.
 - **Return trips (backhaul)**: carriers post an empty leg (vehicle, from, to, departure, free pallets, discount). Loads
   are matched when pickup is ≤ 15 km from the leg's start, delivery ≤ 18 km from its end, departure within ±6 h and the
   vehicle can carry it. Shippers can post-and-book in one step; carriers can pull a matching load onto their way home.
@@ -72,24 +81,53 @@ underneath: streets, land use and 3D buildings lit by the sun.
 
 ### Rules checked before booking
 
-All in `src/lib/checks.ts`, checked against the rules as they stand in October 2026 (see [Sources](#sources-for-the-rules)).
+Pure functions in `src/lib/checks.ts` and `src/lib/cabotage.ts`, checked against the rules as they stand in October 2026
+(see [Sources](#sources-for-the-rules)), each with unit tests in `tests/unit`.
 
-- **San Sebastián / Donostia ZBE** (low-emission zone, in force since December 2024, camera fines since March 2025):
-  until the end of 2027 it bars only vehicles **without a DGT label**; from 2028 it also bars **B**. A B-label truck is
-  allowed today and warned that it has until the end of 2027. **Foreign-plated** trucks have no DGT label at all and need
-  the city's **prior authorisation**, which the checks and the dispatch alerts point out.
+- **San Sebastián / Donostia ZBE** (Ordenanza ZBE Donostia Centro, BOG nº 241 of 16-12-2024, in force from 17-12-2024;
+  camera fines since March 2025):
+  - labels **0, ECO, C and B** enter freely in phase 1 (art. 8.1 b);
+  - **B is banned from phase 2**, which starts 36 months after entry into force (art. 7), on **17-12-2027**.
+    donostia.eus says "2028"; Zama uses the ordinance's date, and a B-label truck is told it is allowed until then;
+  - vehicles **without a label** are banned (art. 11.1) unless they hold the phase-1 authorisation for regular
+    deliveries (art. 8.3, 3.2 f). One demo van has it; another unlabelled van doesn't and gets flagged. From phase 2
+    unlabelled delivery vehicles are banned too (art. 11.2);
+  - **foreign-plated** trucks have no DGT label at all: they file a declaration and need the city's **prior
+    authorisation** (art. 9), which the checks and the dispatch alerts point out;
+  - stops are checked against the **annex-1 perimeter** (Parte Vieja, Centro and part of Amara, bounded by the
+    Urumea), not the whole city: Gros, Egia and Belartza are outside;
+  - Irun has announced its own ZBE, reported for spring 2028. Zama doesn't check it yet.
 - **Pays Basque ZFE-m** (since June 2025, 06:00–20:00, Tarnos to Hendaye, which covers every French place in the app):
   Crit'Air 4 or better, and foreign trucks need a Crit'Air sticker. Every demo vehicle passes, so the row is
   informational.
-- **EU cabotage** (Reg. 1072/2009 as amended by Reg. 2020/1055): a carrier working **inside a country that isn't its
-  own** (a French haulier on a Spanish domestic job, or an Irun haulier doing Hendaye → Bayonne) may run up to **3
-  operations within 7 days** of an international delivery, then has a **4-day cooling-off** in that country. Bids, the
-  load board and dispatch show the counter, and other shippers' simulated accepts skip carriers that are at the limit.
-  (The real limit counts per vehicle from its incoming trip; the demo counts per carrier.)
-- **Transport documents**: from **5 October 2026** the control document for for-hire road freight **inside Spain**
-  (cabotage included) must be electronic: the **DeCA** (Ley 9/2025). Cross-border trips need a **CMR** consignment
-  note, issued here as an **e-CMR** (electronic CMR is optional; paper stays valid). Trips **inside France** use a
-  **lettre de voiture**. Every load shows which one applies.
+- **Licences and tachographs**: international jobs and cabotage need a **Community licence** for vehicles over 2.5 t,
+  and light vans (2.5–3.5 t) on them need a **tachograph** from 1 July 2026. Carriers hold their own country's
+  licences (Spanish MDL / MDP, French LTI, or a Community licence issued by Spain, France or Lithuania). The screens
+  won't accept, book or assign a carrier or vehicle that may not run the job; `eligibleCarriers(load, ctx)` in
+  `src/data/seed.ts` gives the legal pool for a load.
+- **EU cabotage** (Reg. 1072/2009 art. 8 as amended by Reg. 2020/1055, Commission Q&A of 21-2-2022), for any carrier
+  working **inside a country that isn't its own** (a French haulier on a Spanish domestic job, or an Irun haulier doing
+  Hendaye → Bayonne), counted **per vehicle and per host country**:
+  - at most **3 operations within 7 days** of the last unloading of an incoming international carriage, with the
+    same vehicle;
+  - then a **4-day cooling-off** in that country once the vehicle has left it.
+
+  The ledger is derived from the loads in the market, each vehicle's history before the market opened
+  (`VEHICLE_HISTORY` in `src/data/companies.ts`, counted back from the store's `anchor`) and the cross-border and
+  cabotage jobs of loads the market has since pruned from the board (the store's `ledger`), so an operation still
+  counts after its load is gone. Bids show "Cabotage n/3 · this vehicle", accepting, assigning or booking over the
+  limit is blocked, and Dispatch lists every vehicle's window and cooling-off. Drivers on cabotage and cross-trade jobs
+  are posted, so a posting declaration is flagged. The simulated market checks every bid, booking and truck it picks
+  with the same per-vehicle rules (see [How the simulation works](#how-the-simulation-works)). Not modelled: the single
+  operation allowed in a third country within 3 days of an unladen entry.
+- **Transport document**, with who issues it; every load shows which one applies:
+  - inside Spain, the **DeCA**: the contracting shipper and the carrier issue it, and it is electronic from
+    **5 October 2026** (Ley 9/2025). Cabotage is included. Exempt (flagged): transport needing no licence, house
+    removals and parcels;
+  - between Spain and France, a **CMR** made out by the sender: on paper, or an **e-CMR if both parties agree**. Both
+    countries ratified the e-CMR protocol and neither requires it;
+  - inside France, a **lettre de voiture** drawn up by the carrier (arrêté of 9-11-1999), which also shows the plate
+    and unloading date on a cabotage leg.
 
 ### Live 3D map (`src/components/map`)
 
@@ -109,11 +147,25 @@ All in `src/lib/checks.ts`, checked against the rules as they stand in October 2
 - If the tiles can't be reached (the TileJSON fails, the first tiles all fail, or nothing arrives within 25 s) the map
   switches to a **schematic fallback** drawn from `src/data/coast.ts`, and tries the real basemap again when the browser
   comes back online. A lost WebGL context remounts the map instead of leaving it blank.
+- **Without WebGL2** (or if the 3D map crashes) the screen keeps its KPIs and panels and draws the corridor as an SVG
+  schematic with the live trucks, loads, return trips and warehouses, under a translated notice.
+- **Made once per visit to the app**: the app layout mounts the map the first time `/{lang}/app` opens and keeps it,
+  hidden with `<Activity mode="hidden">`, while other screens are shown, so coming back reuses its tiles, camera and
+  overlay (a new map per visit used to leak about 1 MB through deck.gl's overlay). deck.gl is its own chunk, loaded
+  after the basemap's first `idle`; the trucks are redrawn only while they are shown and moving, as often as they move
+  half a pixel, and an idle or hidden map draws nothing.
+- **Credits** are built from the dictionaries and rendered by the app layout, so they are in the server HTML and show
+  from the first paint; they fold into an (i) button on the first pan or zoom, or after five seconds on phones
+  ([OSMF attribution guidelines](https://osmfoundation.org/wiki/Licence/Attribution_Guidelines)). MapLibre's own
+  controls get their labels from the dictionaries too (`locale`).
+- The MapLibre worker is copied to `public/vendor/maplibre-gl-worker-<version>.mjs` by `scripts/copy-worker.mjs` and
+  served with `Cache-Control: public, max-age=31536000, immutable` (`next.config.ts`).
 
 ### Warehouse digital twin (`src/components/warehouse`, `src/components/screens/warehouse.tsx`)
 
-Six warehouses on the real logistics sites: Zaisa cross-dock (bonded rows), Ugaldetxo DC, Herrera port warehouse,
-Lezo cold store (chilled + frozen), Belartza urban hub and the Adour depot in the port of Bayonne.
+Six warehouses with fictional operators on the corridor's real logistics sites: the Irun cross-dock (Zaisa area,
+bonded rows), Ugaldetxo DC, the Pasaia port warehouse (Herrera quay), Lezo cold store (chilled + frozen), Belartza
+urban hub and the Adour depot in the port of Bayonne. Names that borrow a real site say "fictional" in the name.
 
 - **3D twin** with `@react-three/fiber`: instanced pallet positions inside pallet racking (blue uprights, orange
   beams), AMR robots driving the aisles, dock doors with the trucks that are at them right now, temperature and
@@ -130,6 +182,8 @@ Lezo cold store (chilled + frozen), Belartza urban hub and the Adour depot in th
   and KPIs (occupancy, A movers, counts due, expiring stock, doors busy now).
 - Light on phones: capped pixel ratio, smaller shadow maps, shadows redrawn only when something moves, and no drawing
   while the twin is scrolled out of view.
+- three.js loads after the KPIs and lists have painted, when the browser is idle and the twin is on screen. Without
+  WebGL2 (or if the renderer fails) the stock list takes the twin's place and the tabs open on the dock timeline.
 
 ### Everything else
 
@@ -143,6 +197,11 @@ Lezo cold store (chilled + frozen), Belartza urban hub and the Adour depot in th
 - **Share cards**: a custom 1200×630 Open Graph image per language with alt text in that language, rendered with
   `next/og` on the first request and cached.
 - **App icon, web manifest, robots and sitemap**; the demo app itself is `noindex`.
+- **Fast first paint**: each screen's title and lead are in the server HTML (the shell shows them while the market
+  starts, `src/components/app/intro.ts`), only Manrope's latin file is preloaded (latin-ext, cyrillic and the mono
+  font load on demand), and the top bar's clock uses tabular Manrope rather than the mono font. Lighthouse 12 mobile
+  on a production build: `/es/app` LCP 2.25–2.80 s (median 2.80 s, was 2.71–3.25 s), `/es/app/warehouse` 2.41–2.95 s
+  (median 2.95 s, was 3.56–3.77 s), FCP 0.9 s, CLS ≤ 0.001.
 
 ---
 
@@ -150,13 +209,29 @@ Lezo cold store (chilled + frozen), Belartza urban hub and the Adour depot in th
 
 The market is seeded relative to the moment you open the demo (`src/data/seed.ts`), so trucks are already on the road
 and pickups are always a few hours away. A **simulated clock** runs at ×20 by default (click the clock for ×1 or ×60),
-and a director (`tick()` in `src/store/market.ts`) keeps the market alive every second: carriers bid, other shippers
-accept the best bid as pickup nears, booked loads get vehicles, trucks depart and arrive, new loads appear, empty
-return trips get filled.
+and a director (`src/store/director.ts`) keeps the market alive: carriers bid on loads they have a truck for, other
+shippers accept the best bid as pickup nears, booked loads get vehicles (one job per truck), trucks depart and arrive,
+new loads appear, unbooked ones get a later pickup or expire, carriers post their empty legs home and shippers fill
+them, and the dock schedule rolls forward. It runs on simulated time (rates per simulated minute, in steps of at most
+five minutes), so a background tab that the browser throttles to one tick a minute sees the same market, and it keeps
+at least six trucks on the road. After more than six simulated hours without a tick (a sleeping laptop, a frozen tab)
+the day is re-seeded around the current time.
+
+The other carriers follow the same rules as you. Every bid, booking, return-trip match and truck the director picks
+must pass the checks the screens show for that vehicle (licence, tachograph, its cabotage ledger and the Donostia
+ZBE: `mayRun` in `src/store/director.ts`), at the pickup the bid offers and at the load's own, so the simulated market
+never makes a bid or a booking the screens mark as not allowed. A load booked after its pickup time is picked up then
+(its pickup and deadline move on), so its rules are checked for when the truck actually runs it. And so that what a
+truck may do can't change under a job it holds, a truck with cabotage in hand takes no other cross-border work, and
+takes cabotage only with no other cross-border work in hand (`mayTake`). Cabotage stays rare as a result (about 15 bids
+and 14 operations in 160 simulated hours), as on the real corridor. `tests/unit/market.test.ts` checks all of this at
+every tick of an 8-hour run, and judges every cabotage operation against everything its vehicle ever did.
 
 What you create yourself (loads you post, your bids, return trips, dock bookings, warehouse changes, role and map
-settings) is saved in your browser (`localStorage`, key `zama-demo-v1`) together with the market clock, so a reload
-carries on where you left off: a truck that was halfway is still halfway. *Reset demo* in the ⋯ menu clears it.
+settings) is saved in your browser (`localStorage`, key `zama-demo-v1`, schema version 2, see `src/store/saved.ts`)
+together with the market clock, so a reload carries on where you left off: a truck that was halfway is still halfway.
+Saved records are checked against the catalogues when the demo opens, and any that don't fit are dropped. *Reset demo*
+in the ⋯ menu clears it.
 
 ---
 
@@ -178,7 +253,7 @@ src/
   data/                  places, road graph & routing, coast outline, companies, warehouses & bins, seeded market
   i18n/                  locales, dictionaries (en is the source; the others are type-checked against it)
   lib/                   pricing, compliance checks, solar position, geodesy, formatting
-  store/                 the market store (actions + simulation) and the shared clock
+  store/                 the market store (actions), the director (simulation), saved state and the shared clock
   proxy.ts               sends / and any un-prefixed path to the reader's language
 scripts/                 copy-worker.mjs (MapLibre worker → public/vendor), screens.mjs (README screenshots)
 ```
@@ -229,9 +304,10 @@ canonical origin used in Open Graph tags, hreflang and the sitemap (otherwise Ve
 - No backend, accounts, payments or real carriers: the market is simulated in each browser.
 - Routing uses a hand-traced graph of the AP-8, the GI-20 ring, the A-63, N-1/GI-636, D-810 and urban links (Dijkstra on travel time),
   not a routing engine; times and distances are close at regional scale, approximate street by street.
-- Prices, tolls and CO₂ are a demo model (CO₂ is per vehicle-km, tank-to-wheel, charged to one load; ISO 14083 /
-  GLEC would use well-to-wheel figures shared by tonne-km). ZBE, ZFE, cabotage and document logic is simplified to what
-  a dispatcher needs to see.
+- Prices and CO₂ are a demo model; only the tolls follow published tariffs. CO₂ is per vehicle-km, tank-to-wheel,
+  charged to one load (ISO 14083 / GLEC would use well-to-wheel figures shared by tonne-km). The rules are simplified
+  to what a dispatcher needs to see: no one-off ZBE authorisations, no third-country cabotage after an unladen entry,
+  no registry check of licences.
 - The e-CMR / DeCA flow is a status timeline, not an integration with a certified provider.
 
 ## What the research says comes next
@@ -280,20 +356,30 @@ storage as well as trucks.
 4. A certified DeCA / e-CMR / electronic lettre de voiture provider; payments with escrow or factoring.
 5. Telematics for live positions and arrival times; EV charging for vans in the ZBE.
 6. More checks: Spain's ban on drivers of vehicles over 7.5 t loading or unloading (since September 2022), and the
-   smart tachograph v2 for vans over 2.5 t on international or cabotage work (since July 2026).
+   tachograph's generation (vans over 2.5 t abroad need the smart tachograph v2; Zama only checks that one is fitted).
 7. Expand along the corridor: Bilbao, Vitoria-Gasteiz, Pamplona, Bordeaux.
 
 ## Sources for the rules
 
 - DeCA: [Ministerio de Transportes](https://www.transportes.gob.es/transporte-terrestre/profesionales-transporte/servicios-transportista/documento-electronico-control-administrativo-deca)
-  (Ley 9/2025, disposición transitoria octava; Orden FOM/2861/2012).
-- Donostia ZBE and foreign vehicles: [donostia.eus](https://donostia.eus/en/movilidad/zona-bajas-emisiones/solicita-autorizacion/foreing-vehicles),
+  (Ley 9/2025, disposición transitoria octava; [resolution of 5-6-2026](https://www.boe.es/buscar/act.php?id=BOE-A-2026-12784);
+  [Orden FOM/2861/2012](https://www.boe.es/buscar/act.php?id=BOE-A-2013-154) arts. 2, 4 and 7).
+- Lettre de voiture: arrêté of 9-11-1999 on the documents carried on board, art. 4.
+- Donostia ZBE: the [ordinance, BOG nº 241 of 16-12-2024](https://egoitza.gipuzkoa.eus/gao-bog/castell/bog/2024/12/16/c2409185.pdf)
+  (arts. 7, 8, 9, 11 and annex 1); foreign vehicles: [donostia.eus](https://donostia.eus/en/movilidad/zona-bajas-emisiones/solicita-autorizacion/foreing-vehicles),
   [RACE map](https://www.race.es/zonas-de-bajas-emisiones/mapa-zbe-donostia-san-sebastian).
 - Pays Basque ZFE-m: [Connexion France](https://www.connexionfrance.com/news/zfe-basque-country-to-ban-most-polluting-vehicles-from-june-2025/707597);
   ZFEs kept by the Conseil constitutionnel on 21 May 2026 ([Public Sénat](https://www.publicsenat.fr/actualites/politique/loi-de-simplification-le-conseil-constitutionnel-censure-la-suppression-des-zfe-et-lassouplissement-du-zan)).
-- Cabotage (Reg. 1072/2009 as amended by Reg. 2020/1055): [EUR-Lex summary](https://eur-lex.europa.eu/summary/EN/tr0038).
-- e-CMR is optional: [eFTI / e-CMR overview](https://routal.com/en/ecmr).
-- Tolls: [Bidegi](https://www.bidegi.eus/en/deskontuak), [A63 autoroute](https://en.wikipedia.org/wiki/A63_autoroute).
+- Cabotage (Reg. 1072/2009 as amended by Reg. 2020/1055): [EUR-Lex summary](https://eur-lex.europa.eu/summary/EN/tr0038),
+  [Commission Q&A](https://transport.ec.europa.eu/transport-modes/road/mobility-package-i/market-rules/rules-cabotage-applicable-21-february-2022_en)
+  (Q4, Q7, Q8, Q10); posting: [Q&A on Directive 2020/1057](https://transport.ec.europa.eu/transport-modes/road/mobility-package-i/posting-rules/questions-and-answers-posting-drivers-under-directive-eu-20201057_en).
+- Licences and light vans: [TRACE II guidance](https://transport.ec.europa.eu/system/files/2023-12/TRACE_II_Access_to_Profession_Enforcement_Guidance.pdf),
+  [tachograph Q&A](https://transport.ec.europa.eu/transport-modes/road/mobility-package-i/tachographs/questions-and-answers-tachograph-provisions-mobility-package-1_en).
+- e-CMR is optional: [UN Treaty Collection](https://treaties.un.org/Pages/ViewDetails.aspx?src=TREATY&mtdsg_no=XI-B-11-b&chapter=11&clang=_en)
+  (Spain and France are parties), [eFTI / e-CMR overview](https://routal.com/en/ecmr).
+- Tolls: [Bidegi 2026 AP-8 tariffs](https://www.bidegi.eus/documents/42696171/0/2026__AP-8_AP-1_AP-636_tarifak.pdf/0c9dbcf3-f3e7-e6f6-709b-8cbb7d9da9d5),
+  [ASF class 4 grid, 2024](https://public-content.vinci-autoroutes.com/PDF/Tarifs-peage-asf/C4-TARIFS-WEB-2024.pdf),
+  [Bidegi discounts](https://www.bidegi.eus/en/deskontuak).
 
 These were checked through web search in October 2026; the primary texts (BOE, the Donostia ordinance) should be read
 before relying on any of it.
@@ -304,6 +390,34 @@ before relying on any of it.
 
 - Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, tiles by
   [OpenFreeMap](https://openfreemap.org), schema by [OpenMapTiles](https://openmaptiles.org).
-- Terrain: [Mapzen Terrain Tiles](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) on AWS Open Data.
+- Terrain: [Mapzen Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) on AWS Open Data, with one credit line
+  per source dataset as [Tilezen asks](https://github.com/tilezen/joerd/blob/master/docs/attribution.md):
+  - Europe terrain data produced using Copernicus data and information funded by the European Union – EU-DEM layers.
+  - SRTM and GMTED2010 terrain data courtesy of the U.S. Geological Survey.
+  - ETOPO1 bathymetry: U.S. National Oceanic and Atmospheric Administration.
+
+  These are the sources actually in the tiles we show: the `X-Imagery-Sources` header of every Terrarium tile over the
+  map's bounds (-3.4, 42.6 to -0.2, 44.3) lists ETOPO1, GMTED2010, SRTM and EU-DEM at zooms 7 to 15 (the map allows
+  7.5 and up). The map and the landing footer show all of them in every language (`map.credits`, `landing.mapData`).
 - Fonts: Manrope and JetBrains Mono, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
-- The coast outline, road graph, companies, people and plates were drawn or invented for this prototype.
+- The coast outline, road graph, companies, people and plates were drawn or invented for this prototype. Plates use a
+  `DEMO-` format, and the invented names were web-checked against real businesses
+  ([docs/fictional-names.md](docs/fictional-names.md)); formal registry checks are still pending.
+
+### Where the coast outline and the road graph come from
+
+`src/data/coast.ts` (coast, Bidasoa, Adour, Urumea) and `src/data/network.ts` (junctions and road shapes) were written
+by hand, as approximate coordinates, by the session that built the prototype (commit 50a3b22). No dataset was
+imported, and that session left no record of what it looked at.
+
+Checked against OpenStreetMap (Overpass, 24 October 2026), they are not copies or simplifications of OSM geometry,
+which at this three-decimal precision would sit within about 50 m of it:
+
+| File | Vertices compared | Distance to the nearest OSM way |
+| --- | --- | --- |
+| `coast.ts` `COAST` | 57 inside 43.25–43.56 N, 2.10–1.45 W | median 128 m, 90th percentile 515 m, max 1.2 km (`natural=coastline`) |
+| `network.ts` | 71 coordinate pairs | median 144 m, 90th percentile 438 m, max 1.0 km (motorway to secondary) |
+
+Motorway junctions sit 30 m to 1.25 km off the OSM carriageways. The outline may still have been traced by eye from
+OSM-based maps, so wherever it is drawn it is credited to OpenStreetMap as a precaution: the map's SVG schematic
+(without WebGL) does, and so do the share card and the landing illustration.

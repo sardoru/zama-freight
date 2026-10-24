@@ -3,7 +3,7 @@
 // Small shared building blocks. Colours come from the theme tokens in
 // globals.css, so everything here works in light and dark.
 import { Loader2, X } from "lucide-react";
-import { forwardRef, useEffect, useEffectEvent, useId, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useEffectEvent, useId, useRef, type ButtonHTMLAttributes, type ReactNode, type RefObject } from "react";
 import type { EcoLabel, LoadStatus } from "@/data/types";
 import { useI18n } from "@/i18n/client";
 import { cn } from "@/lib/utils";
@@ -54,6 +54,7 @@ const ECO: Record<EcoLabel, string> = {
   ECO: "bg-[linear-gradient(90deg,#1f9e4a_50%,#1f6fd6_50%)] text-white",
   C: "bg-[#1f9e4a] text-white",
   B: "bg-[#f1c40f] text-[#3b2f00]",
+  none: "bg-surface-3 text-ink-2",
 };
 
 /** The Spanish DGT environmental sticker. Only Spanish plates carry one: check hasDgtLabel(vehicle) first. */
@@ -61,10 +62,10 @@ export function EcoBadge({ label, className }: { label: EcoLabel; className?: st
   const { d } = useI18n();
   return (
     <span
-      title={d.common.ecoLabel.replace("{{label}}", label)}
+      title={label === "none" ? d.common.noEcoLabel : d.common.ecoLabel.replace("{{label}}", label)}
       className={cn("inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[0.62rem] font-extrabold tracking-tight shadow-sm ring-1 ring-black/10", ECO[label], className)}
     >
-      {label}
+      {label === "none" ? "–" : label}
     </span>
   );
 }
@@ -231,48 +232,96 @@ export function Empty({ children, icon, className }: { children: ReactNode; icon
   );
 }
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const TABBABLE = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type=hidden])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "summary",
+  "[contenteditable]:not([contenteditable=false])",
+  "[tabindex]",
+].join(",");
 
-/** A panel that slides up from the bottom on phones and sits on the right on desktop. */
+/** What Tab can reach inside `root`, in order (visible, not inert, tabindex ≥ 0). */
+function tabbables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TABBABLE)).filter((el) => el.tabIndex >= 0 && !el.closest("[inert]") && el.getClientRects().length > 0);
+}
+
+/**
+ * Modal focus for sheets and the app menu (issue #1). While `open`:
+ * - focus moves into the panel once, when it opens (never again on re-renders);
+ * - Tab and Shift+Tab cycle inside the panel, and focus that lands outside is pulled back;
+ * - Escape calls the latest `onClose` (an effect event: callers pass inline closures and
+ *   re-render every second with the market clock, and that must not re-run the effect);
+ * - on close, focus goes back to the element that had it before opening.
+ * Call the returned `keepFocus()` before closing when the user moved on elsewhere
+ * (a click outside a menu), so focus isn't pulled back to the opener.
+ */
+export function useModalFocus(open: boolean, panel: RefObject<HTMLElement | null>, onClose: () => void, initial: "panel" | "first" = "panel") {
+  const close = useEffectEvent(() => onClose());
+  const restoreRef = useRef(true);
+
+  useEffect(() => {
+    const el = panel.current;
+    if (!open || !el) return;
+    const active = document.activeElement;
+    const opener = active instanceof HTMLElement && active !== document.body && !el.contains(active) ? active : null;
+    restoreRef.current = true;
+    (initial === "first" ? (tabbables(el)[0] ?? el) : el).focus({ preventScroll: true });
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = tabbables(el);
+      const now = document.activeElement;
+      if (!items.length) {
+        e.preventDefault();
+        el.focus({ preventScroll: true });
+      } else if (!(now instanceof Node) || !el.contains(now)) {
+        e.preventDefault();
+        (e.shiftKey ? items[items.length - 1] : items[0]).focus();
+      } else if (e.shiftKey && (now === items[0] || now === el)) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!e.shiftKey && now === items[items.length - 1]) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    };
+    // A click on something outside (a toast above the backdrop) can still move focus: put it
+    // back where it was inside the panel.
+    let last: HTMLElement = el;
+    const onFocusIn = (e: FocusEvent) => {
+      if (!(e.target instanceof HTMLElement)) return;
+      if (el.contains(e.target)) last = e.target;
+      else if (restoreRef.current) (last.isConnected ? last : el).focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("focusin", onFocusIn);
+      if (restoreRef.current && opener?.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, [open, panel, initial]);
+
+  const keepFocus = useCallback(() => {
+    restoreRef.current = false;
+  }, []);
+  return { keepFocus };
+}
+
+/** A modal panel that slides up from the bottom on phones and sits on the right on desktop. */
 export function Sheet({ open, onClose, title, children, className }: { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode; className?: string }) {
   const { d } = useI18n();
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  // Callers pass inline closures and re-render every second with the market clock;
-  // an effect event reads the latest one without re-running the effect below.
-  const close = useEffectEvent(() => onClose());
-  useEffect(() => {
-    if (!open) return;
-    // Focus moves in once when the sheet opens and goes back to whatever opened it when it closes.
-    const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
-    const onKey = (e: KeyboardEvent) => {
-      const box = ref.current;
-      if (e.key === "Escape") close();
-      else if (e.key === "Tab" && box) {
-        // aria-modal: Tab and Shift+Tab cycle inside the sheet.
-        const items = [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length > 0);
-        const first = items[0];
-        const last = items[items.length - 1];
-        const at = document.activeElement;
-        if (!first || !last) {
-          e.preventDefault();
-          box.focus();
-        } else if (e.shiftKey && (at === first || at === box || !box.contains(at))) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && (at === last || !box.contains(at))) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    ref.current?.focus();
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      if (opener?.isConnected) opener.focus();
-    };
-  }, [open]);
+  useModalFocus(open, ref, onClose);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center md:items-stretch md:justify-end">
@@ -289,9 +338,9 @@ export function Sheet({ open, onClose, title, children, className }: { open: boo
         )}
       >
         <div className="flex items-center gap-3 border-b border-line px-5 py-2">
-          <div id={titleId} className="min-w-0 flex-1 truncate font-bold text-ink">
+          <h2 id={titleId} className="min-w-0 flex-1 truncate font-bold text-ink">
             {title}
-          </div>
+          </h2>
           <button type="button" onClick={onClose} className="-mr-1.5 rounded-lg p-2.5 text-ink-3 transition hover:bg-surface-2 hover:text-ink" aria-label={d.common.close}>
             <X className="size-5" aria-hidden />
           </button>

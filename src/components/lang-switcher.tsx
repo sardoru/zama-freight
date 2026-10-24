@@ -4,6 +4,7 @@ import { Globe } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useI18n } from "@/i18n/client";
 import { LOCALE_COOKIE, LOCALE_NAMES, LOCALES, isLocale, type Locale } from "@/i18n/config";
+import { DOC_SLUGS, docFromSlug } from "@/lib/doc-routes";
 import { cn } from "@/lib/utils";
 
 /** Native select (best on phones); remembers the choice in a cookie the proxy reads. */
@@ -15,8 +16,12 @@ export function LangSwitcher({ className }: { className?: string }) {
   const change = (next: Locale) => {
     document.cookie = `${LOCALE_COOKIE}=${next}; path=/; max-age=31536000; samesite=lax`;
     const parts = pathname.split("/");
-    if (isLocale(parts[1])) parts[1] = next;
-    else parts.splice(1, 0, next);
+    if (isLocale(parts[1])) {
+      // The privacy and legal pages have a slug per language (/es/privacidad ⇄ /fr/confidentialite).
+      const doc = parts.length === 3 ? docFromSlug(parts[1], parts[2]) : undefined;
+      parts[1] = next;
+      if (doc) parts[2] = DOC_SLUGS[next][doc];
+    } else parts.splice(1, 0, next);
     router.push(parts.join("/") + window.location.search + window.location.hash);
   };
 

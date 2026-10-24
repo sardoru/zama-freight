@@ -164,6 +164,8 @@ export function CorridorArt({ lang, d }: { lang: Locale; d: Dict }) {
           </div>
         </div>
       </div>
+      {/* The coast outline and road graph are derived from OpenStreetMap data. */}
+      <p className="mt-1.5 px-1 text-right text-[0.68rem] leading-4 text-ink-3">{d.landing.mapCredit}</p>
       {/* the same cards under the art on phones */}
       <div className="mt-3 grid grid-cols-2 gap-2 sm:hidden">
         <ArtCard tone="accent" kicker="ZM-4128" title={`${PLACES.irun.names[lang]} → ${PLACES.bayonne.names[lang]}`} body={fill(d.landing.heroBids, { n: 3, amount: f.money(best) })} />

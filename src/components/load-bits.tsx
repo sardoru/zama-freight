@@ -1,19 +1,106 @@
 "use client";
 
-// Pieces of a load shared by the load board, dispatch and the post form.
-import { Check, CircleAlert, CircleCheck, FileCheck, Leaf, ShieldCheck, TriangleAlert } from "lucide-react";
-import type { ReactNode } from "react";
+// Pieces of a load shared by the load board, dispatch, fleet and the post
+// form: the load card, the rule checks, the consignment note and the labels
+// that keep demo prices and invented companies from passing as real.
+import { Check, CircleAlert, CircleCheck, FileCheck, Leaf, ShieldCheck, TriangleAlert, UserRound } from "lucide-react";
+import { useMemo, type ReactNode } from "react";
 import { CARRIER, SHIPPER, VEHICLE } from "@/data/companies";
 import { route } from "@/data/network";
 import { PLACES } from "@/data/places";
 import { driveMs } from "@/data/seed";
-import type { Bid, EcmrState, Load, ReturnTrip } from "@/data/types";
+import type { Bid, Country, EcmrState, EcoLabel, Load, ReturnTrip, Vehicle } from "@/data/types";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, cabotageUsed, isCabotage, needsEcmr, touchesZbe, touchesZfe, zbeEndsSoon, zbeNeedsAuth, zbeProblem } from "@/lib/checks";
-import { cn } from "@/lib/utils";
+import { INTL_LOCALE, type Locale } from "@/i18n/config";
+import type { Dict } from "@/i18n/types";
+import { CABOTAGE_LIMIT, runVerdict, type RunVerdict } from "@/lib/cabotage";
+import { hasDgtLabel, jobScope, licenceLocalName, needsPostingDeclaration, touchesZbe, touchesZfe, transportDocument, ZBE_PHASE2, zbeFor, type DocKind } from "@/lib/checks";
+import { TZ } from "@/lib/format";
+import { cn, fill } from "@/lib/utils";
 import { useMarket } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
 import { Chip, Progress, StatusChip } from "./ui";
+
+// ── Small helpers ───────────────────────────────────────────────────────────
+
+/** The DGT label as text ("C", "B", or "no label"). */
+export const labelText = (eco: EcoLabel, d: Dict) => (eco === "none" ? d.common.labelNone : eco);
+
+export const docName = (kind: DocKind, d: Dict) => ({ deca: d.ecmr.deca, cmr: d.ecmr.cmr, lettre: d.ecmr.lettre })[kind];
+
+export const whereText = (country: Country | undefined, d: Dict) => (country === "FR" ? d.checks.inFR : d.checks.inES);
+
+const EU_MONTHS = ["urt.", "ots.", "mar.", "api.", "mai.", "eka.", "uzt.", "abu.", "ira.", "urr.", "aza.", "abe."];
+const madridYmd = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" });
+
+/**
+ * Deadlines: "Fri 31 Oct", or with the year for far dates. Basque is spelt out
+ * by hand ("2027 abe. 16"): browsers print "17(a)" or "M12" for it.
+ */
+function deadlineFmt(lang: Locale) {
+  const make = (opts: Intl.DateTimeFormatOptions, withYear: boolean) => {
+    const fmt = new Intl.DateTimeFormat(INTL_LOCALE[lang], { ...opts, timeZone: TZ });
+    if (lang !== "eu") return (t: number) => fmt.format(t);
+    return (t: number) => {
+      const [y, m, d] = madridYmd.format(t).split("-").map(Number);
+      return `${withYear ? `${y} ` : ""}${EU_MONTHS[m - 1]} ${d}`;
+    };
+  };
+  return { day: make({ weekday: "short", day: "numeric", month: "short" }, false), date: make({ day: "numeric", month: "short", year: "numeric" }, true) };
+}
+
+export function useDeadlines() {
+  const { lang } = useI18n();
+  return useMemo(() => deadlineFmt(lang), [lang]);
+}
+
+/** What the rule checks need: the loads, the market time, and the cabotage ledger's anchor and pruned jobs (the director uses the same). */
+export function useRuleCtx() {
+  const loads = useMarket((s) => s.loads);
+  const anchor = useMarket((s) => s.anchor);
+  const past = useMarket((s) => s.ledger);
+  const now = useSimNow();
+  return { loads, now, anchor, past };
+}
+
+type RuleJob = Pick<Load, "id" | "from" | "to" | "pickupAt"> & Partial<Pick<Load, "departedAt">>;
+
+/** Why a vehicle can't take a job, in a few words; null when it can. */
+export function blockReason(v: RunVerdict, d: Dict, day: (t: number) => string): string | null {
+  const out: string[] = [];
+  if (v.licence.includes("communityLicence")) out.push(d.loads.reasonLicence);
+  if (v.licence.includes("tachograph")) out.push(d.loads.reasonTachograph);
+  const c = v.cabotage;
+  if (c.block === "coolingOff" && c.coolingOffUntil) out.push(d.loads.reasonCooling.replace("{{date}}", day(c.coolingOffUntil)));
+  else if (c.block === "noIncoming") out.push(d.loads.reasonNoIncoming);
+  else if (c.block === "window") out.push(d.loads.reasonWindow);
+  else if (c.block === "limit") out.push(d.loads.reasonLimit);
+  return out.length ? out.join(", ") : null;
+}
+
+/** "Demo estimate, not a market rate" under a price (short form in dense rows). */
+export function DemoNote({ short, className }: { short?: boolean; className?: string }) {
+  const { d } = useI18n();
+  return <span className={cn("block text-[0.65rem] leading-tight font-medium text-ink-3", className)}>{short ? d.common.demoShort : d.common.demoEstimate}</span>;
+}
+
+/** Marks an invented company. */
+export function FictionalTag({ className }: { className?: string }) {
+  const { d } = useI18n();
+  return <span className={cn("inline-flex shrink-0 items-center rounded-full border border-line px-1.5 text-[0.62rem] leading-4 font-semibold text-ink-3", className)}>{d.common.fictional}</span>;
+}
+
+/** The cabotage / licence chip of a bid or offer. */
+export function RuleChip({ verdict }: { verdict: RunVerdict }) {
+  const { d } = useI18n();
+  if (verdict.licence.length) return <Chip tone="danger">{d.loads.notEligible}</Chip>;
+  const c = verdict.cabotage;
+  if (!c.cabotage) return null;
+  const used = c.block === "limit" ? CABOTAGE_LIMIT : c.block ? c.used : c.used + 1;
+  return <Chip tone={c.block ? "danger" : "warn"}>{fill(d.checks.cabotageChip, { used, limit: CABOTAGE_LIMIT })}</Chip>;
+}
+
+// ── The load card ───────────────────────────────────────────────────────────
 
 export function LoadCard({
   load: l,
@@ -72,6 +159,8 @@ export function LoadCard({
         <div className="shrink-0 text-right">
           <div className="tnum text-lg font-extrabold tracking-tight text-ink">{f.money(price)}</div>
           <div className="tnum text-[0.7rem] text-ink-3">{d.common.perKm.replace("{{v}}", f.money2(price / Math.max(1, r.km)))}</div>
+          {/* Narrow, so it wraps rather than squeezing the route on phones. */}
+          <DemoNote short className="ml-auto max-w-[4.75rem]" />
         </div>
       </div>
       {progress !== null ? (
@@ -100,6 +189,8 @@ export function LoadCard({
   );
 }
 
+// ── The checks ──────────────────────────────────────────────────────────────
+
 type CheckTone = "ok" | "warn" | "bad" | "info";
 
 const CHECK_ICON: Record<CheckTone, string> = { ok: "text-green", warn: "text-warn", bad: "text-danger", info: "text-blue" };
@@ -122,97 +213,159 @@ function CheckRow({ tone, icon, children }: { tone: CheckTone; icon?: ReactNode;
   );
 }
 
-/** Low-emission zones, cabotage and the consignment note, for a load and (optionally) the carrier/vehicle on it. */
-export function ChecksList({
-  load,
-  carrierId,
-  vehicleId,
-}: {
-  load: Pick<Load, "from" | "to"> & Partial<Pick<Load, "status" | "carrierId">>;
-  carrierId?: string;
-  vehicleId?: string;
-}) {
+/**
+ * Low-emission zones, licence, cabotage, posting and the transport document,
+ * for a load and (optionally) the carrier and vehicle that would run it. Rules
+ * change with the date (the ZBE's phase 2), so they're checked at the load's
+ * own time on the market clock.
+ */
+export function ChecksList({ load, carrierId, vehicleId }: { load: RuleJob; carrierId?: string; vehicleId?: string }) {
   const { d } = useI18n();
-  // Rules change with the date (the ZBE's 2028 phase), so they're checked on the market clock.
-  const now = useSimNow();
-  const loads = useMarket((s) => s.loads);
-  const v = vehicleId ? VEHICLE.get(vehicleId) : undefined;
-  const zbe = touchesZbe(load);
-  const zfe = touchesZfe(load);
-  const carrier = carrierId ? CARRIER.get(carrierId) : undefined;
-  const cab = isCabotage(load, carrierId);
-  const used = carrierId ? cabotageUsed(carrierId, loads) : 0;
-  // A load this carrier already holds is one of the operations counted in `used`.
-  const counted = !!carrierId && load.carrierId === carrierId && !!load.status && load.status !== "open" && load.status !== "cancelled";
-  const full = counted ? used > CABOTAGE_LIMIT : used >= CABOTAGE_LIMIT;
-  const doc = needsEcmr(load);
+  const { day, date } = useDeadlines();
+  const ctx = useRuleCtx();
+  const v: Vehicle | undefined = vehicleId ? VEHICLE.get(vehicleId) : undefined;
+  const carrier = CARRIER.get(carrierId ?? v?.carrierId ?? "");
+  const at = load.departedAt ?? load.pickupAt;
+  const scope = carrier ? jobScope(load, carrier.country) : null;
+  const verdict = v ? runVerdict(load, v, ctx.loads, ctx) : null;
+  const zbe = v ? zbeFor(load, v, at) : null;
+  const doc = transportDocument(load, { at, vehicle: v, carrierCountry: carrier?.country });
   const crosses = PLACES[load.from].country !== PLACES[load.to].country;
+  const leaf = <Leaf className="size-4" aria-hidden />;
+  const shield = <ShieldCheck className="size-4" aria-hidden />;
+
+  const cab = verdict?.cabotage;
+  const where = whereText(PLACES[load.from].country, d);
+  const lastDay = date(ZBE_PHASE2 - 1);
   return (
     <ul className="space-y-1.5">
-      {zbe ? (
-        !v ? (
-          <CheckRow tone="info" icon={<Leaf className="size-4" aria-hidden />}>
-            {d.checks.zbeNeed}
-          </CheckRow>
-        ) : zbeNeedsAuth(load, v) ? (
-          <CheckRow tone="warn">{d.checks.zbeForeign}</CheckRow>
-        ) : zbeProblem(load, v, now) ? (
-          <CheckRow tone="bad">{d.checks.zbeBad.replace("{{label}}", v.eco)}</CheckRow>
-        ) : zbeEndsSoon(v.eco, now) ? (
-          <CheckRow tone="warn">{d.checks.zbeSoon.replace("{{label}}", v.eco)}</CheckRow>
-        ) : (
-          <CheckRow tone="ok" icon={<Leaf className="size-4" aria-hidden />}>
-            {d.checks.zbeOk.replace("{{label}}", v.eco)}
-          </CheckRow>
-        )
-      ) : null}
-      {zfe ? (
-        <CheckRow tone="info" icon={<Leaf className="size-4" aria-hidden />}>
+      {!touchesZbe(load) ? null : !v || !zbe ? (
+        <CheckRow tone="info" icon={leaf}>
+          {fill(d.checks.zbeNeed, { date: lastDay })}
+        </CheckRow>
+      ) : !hasDgtLabel(v) ? (
+        // Foreign plates carry no DGT label: the city's authorisation (art. 9) replaces it.
+        <CheckRow tone="warn">{d.checks.zbeForeign}</CheckRow>
+      ) : zbe.status === "banned" ? (
+        <CheckRow tone="bad">{v.eco === "none" ? d.checks.zbeBannedNone : fill(d.checks.zbeBad, { label: v.eco, date: date(ZBE_PHASE2) })}</CheckRow>
+      ) : zbe.status === "authorised" ? (
+        <CheckRow tone="ok" icon={leaf}>
+          {fill(d.checks.zbeAuthorised, { date: lastDay })}
+        </CheckRow>
+      ) : zbe.until ? (
+        // B: allowed today, banned once phase 2 starts.
+        <CheckRow tone="warn">{fill(d.checks.zbeSoon, { label: v.eco, date: lastDay })}</CheckRow>
+      ) : (
+        <CheckRow tone="ok" icon={leaf}>
+          {fill(d.checks.zbeOk, { label: v.eco })}
+        </CheckRow>
+      )}
+      {touchesZfe(load) ? (
+        <CheckRow tone="info" icon={leaf}>
           {d.checks.zfe}
         </CheckRow>
       ) : null}
-      {!zbe && !zfe ? (
-        <CheckRow tone="ok" icon={<Leaf className="size-4" aria-hidden />}>
+      {!touchesZbe(load) && !touchesZfe(load) ? (
+        <CheckRow tone="ok" icon={leaf}>
           {d.checks.zbeNone}
         </CheckRow>
       ) : null}
-      {cab && carrier ? (
-        full ? (
-          <CheckRow tone="bad">{d.checks.cabotageFull.replace("{{carrier}}", carrier.name).replace("{{used}}", String(used))}</CheckRow>
+
+      {carrier && scope !== "domestic" ? (
+        verdict?.licence.includes("communityLicence") || (!v && carrier.licence !== "community") ? (
+          <CheckRow tone="bad">{d.checks.licenceMissing.replace("{{carrier}}", carrier.name).replace("{{name}}", licenceLocalName(carrier))}</CheckRow>
         ) : (
-          <CheckRow tone="ok" icon={<ShieldCheck className="size-4" aria-hidden />}>
-            {d.checks.cabotageOk.replace("{{carrier}}", carrier.name).replace("{{used}}", String(used))}
+          <CheckRow tone="ok" icon={shield}>
+            {d.checks.licenceOk.replace("{{name}}", licenceLocalName(carrier))}
+          </CheckRow>
+        )
+      ) : null}
+      {verdict?.licence.includes("tachograph") ? <CheckRow tone="bad">{d.checks.tachographMissing}</CheckRow> : null}
+
+      {scope === "cabotage" ? (
+        !cab ? (
+          <CheckRow tone="info" icon={shield}>
+            {d.checks.cabotagePick.replace("{{where}}", where)}
+          </CheckRow>
+        ) : cab.block === "coolingOff" && cab.coolingOffUntil ? (
+          <CheckRow tone="bad">{d.checks.cabotageCooling.replace("{{where}}", where).replace("{{date}}", day(cab.coolingOffUntil))}</CheckRow>
+        ) : cab.block === "noIncoming" ? (
+          <CheckRow tone="bad">{d.checks.cabotageNoIncoming.replace("{{where}}", where)}</CheckRow>
+        ) : cab.block === "window" && cab.windowEnds ? (
+          <CheckRow tone="bad">{d.checks.cabotageWindow.replace("{{where}}", where).replace("{{date}}", day(cab.windowEnds))}</CheckRow>
+        ) : cab.block === "limit" ? (
+          <CheckRow tone="bad">{d.checks.cabotageFull.replace("{{where}}", where)}</CheckRow>
+        ) : (
+          <CheckRow tone="ok" icon={shield}>
+            {d.checks.cabotageOk
+              .replace("{{where}}", where)
+              .replace("{{n}}", String(cab.used + 1))
+              .replace("{{date}}", cab.windowEnds ? day(cab.windowEnds) : "")}
           </CheckRow>
         )
       ) : (
-        <CheckRow tone="ok" icon={<ShieldCheck className="size-4" aria-hidden />}>
+        <CheckRow tone="ok" icon={shield}>
           {d.checks.cabotageNone}
         </CheckRow>
       )}
+      {carrier && needsPostingDeclaration(load, carrier.country) ? (
+        <CheckRow tone="info" icon={<UserRound className="size-4" aria-hidden />}>
+          {d.checks.posting}
+        </CheckRow>
+      ) : null}
+
       {crosses ? (
-        <CheckRow tone="info" icon={<ShieldCheck className="size-4" aria-hidden />}>
+        <CheckRow tone="info" icon={shield}>
           {d.checks.border}
         </CheckRow>
       ) : null}
-      <CheckRow tone="info" icon={<FileCheck className="size-4" aria-hidden />}>
-        {d.checks.doc.replace("{{doc}}", d.ecmr[doc])}
-      </CheckRow>
+      <DocRows doc={doc} />
     </ul>
   );
 }
 
+function DocRows({ doc }: { doc: ReturnType<typeof transportDocument> }) {
+  const { d } = useI18n();
+  const icon = <FileCheck className="size-4" aria-hidden />;
+  if (doc.exemptions.length) {
+    const reason = doc.exemptions.map((e) => ({ noLicence: d.checks.exemptNoLicence, removal: d.checks.exemptRemoval, parcels: d.checks.exemptParcels })[e]).join(", ");
+    return (
+      <CheckRow tone="info" icon={icon}>
+        {d.checks.docExempt.replace("{{reason}}", reason)}
+      </CheckRow>
+    );
+  }
+  const issuer = { shipperAndCarrier: d.checks.issuerShipperAndCarrier, sender: d.checks.issuerSender, carrier: d.checks.issuerCarrier }[doc.issuer];
+  const medium = { required: d.checks.electronicRequired, optional: d.checks.electronicOptional, byAgreement: d.checks.electronicByAgreement }[doc.electronic];
+  return (
+    <>
+      <CheckRow tone="info" icon={icon}>
+        {d.checks.doc.replace("{{doc}}", docName(doc.kind, d)).replace("{{issuer}}", issuer)} · {medium}
+      </CheckRow>
+      {doc.cabotage && doc.kind === "lettre" ? (
+        <CheckRow tone="info" icon={icon}>
+          {d.checks.docCabotage}
+        </CheckRow>
+      ) : null}
+    </>
+  );
+}
+
+// ── The consignment note ────────────────────────────────────────────────────
+
 const STEPS: EcmrState[] = ["draft", "shipper", "carrier", "delivered"];
 
-/** The electronic consignment note, step by step. */
-export function EcmrTimeline({ load }: { load: Pick<Load, "from" | "to" | "ecmr"> }) {
+/** The consignment note (DeCA, CMR or lettre de voiture), step by step. */
+export function EcmrTimeline({ load }: { load: Pick<Load, "from" | "to" | "ecmr" | "pickupAt" | "carrierId"> & Partial<Pick<Load, "departedAt">> }) {
   const { d } = useI18n();
-  const doc = needsEcmr(load);
+  const carrier = load.carrierId ? CARRIER.get(load.carrierId) : undefined;
+  const doc = transportDocument(load, { at: load.departedAt ?? load.pickupAt, carrierCountry: carrier?.country });
   const at = STEPS.indexOf(load.ecmr);
   const labels = [d.ecmr.stepDraft, d.ecmr.stepShipper, d.ecmr.stepCarrier, d.ecmr.stepConsignee];
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[0.8rem] font-semibold text-ink">{d.ecmr[doc]}</span>
+        <span className="text-[0.8rem] font-semibold text-ink">{docName(doc.kind, d)}</span>
         <span className="text-[0.72rem] text-ink-3">{d.ecmr[load.ecmr]}</span>
       </div>
       <ol className="mt-2.5 grid grid-cols-4 gap-1">

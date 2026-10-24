@@ -1,5 +1,8 @@
 // The six warehouses of the demo network and what is on their racks. Operators
-// are fictional; the locations are the corridor's real logistics areas.
+// are fictional; the locations are the corridor's real logistics areas. Where a
+// name borrows a real site (the Zaisa transport centre in Irun, the Herrera
+// quay in Pasaia) the name itself says the operator is fictional, so no screen
+// pairs a real name with an invented operator untagged (docs/fictional-names.md).
 import { hash, rng } from "@/lib/random";
 import type { Abc, Bin, Sku, TempZone, Warehouse, WarehouseId } from "./types";
 
@@ -40,7 +43,7 @@ const zones = (...parts: [TempZone, number][]): TempZone[] => parts.flatMap(([z,
 export const WAREHOUSES: Warehouse[] = [
   {
     id: "w-zaisa",
-    name: "Zaisa Cross-Dock",
+    name: "Irun cross-dock (Zaisa area) — fictional operator",
     place: "zaisa",
     operator: "Bidasoa Logistika",
     kind: "crossdock",
@@ -72,9 +75,9 @@ export const WAREHOUSES: Warehouse[] = [
   },
   {
     id: "w-pasaia",
-    name: "Herrera Port Warehouse",
+    name: "Pasaia port warehouse (Herrera quay) — fictional",
     place: "pasaia",
-    operator: "Herrera Terminal",
+    operator: "Kaiaurre Biltegiak",
     kind: "port",
     sqm: 9_000,
     doors: 8,

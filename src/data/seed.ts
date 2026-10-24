@@ -1,5 +1,7 @@
 // The demo day, built relative to the moment the demo opens (t0), so trucks
 // are already on the road and pickups are always "in a few hours".
+import { cabotageCheck, type LedgerContext } from "@/lib/cabotage";
+import { licenceProblems } from "@/lib/checks";
 import { haversine } from "@/lib/geo";
 import { quote, VEHICLE_SPECS } from "@/lib/pricing";
 import { hash, rng } from "@/lib/random";
@@ -7,7 +9,7 @@ import { CARRIERS, ME, VEHICLE, VEHICLES } from "./companies";
 import { route } from "./network";
 import { PLACES, type PlaceId } from "./places";
 import { WAREHOUSES } from "./warehouses";
-import type { Bid, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType } from "./types";
+import type { Bid, Carrier, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType, Warehouse } from "./types";
 
 export const MIN = 60_000;
 export const HOUR = 60 * MIN;
@@ -92,7 +94,11 @@ export const CARRIES: Record<VehicleType, VehicleType[]> = {
 
 export const driveMs = (l: Pick<Load, "from" | "to">) => route(l.from, l.to).minutes * MIN;
 
-export function buildLoads(t0: number): Load[] {
+/**
+ * The demo day's loads around t0. `rename` gives them fresh ids when the day is
+ * re-seeded mid-session (the canonical ZM-4101…4130 are only used once).
+ */
+export function buildLoads(t0: number, rename: (id: string) => string = (id) => id): Load[] {
   return SPECS.map((s) => {
     const q = quote({ from: s.from, to: s.to, vehicle: s.vehicle, express: s.express, tailLift: s.tailLift });
     const r = rng(hash(s.id));
@@ -110,7 +116,7 @@ export function buildLoads(t0: number): Load[] {
     }
     const booked = s.status !== "open";
     return {
-      id: s.id,
+      id: rename(s.id),
       shipperId: s.shipper,
       from: s.from,
       to: s.to,
@@ -140,42 +146,90 @@ export function buildLoads(t0: number): Load[] {
 /** Can this vehicle take a load of this type and weight? */
 export const canCarry = (v: Pick<Vehicle, "type">, type: VehicleType, kg = 0) => CARRIES[v.type].includes(type) && VEHICLE_SPECS[v.type].kg >= kg;
 
-/** Carriers that can serve a load type and weight (have at least one vehicle for it). */
-export function eligibleCarriers(vehicle: VehicleType, kg = 0) {
-  return CARRIERS.filter((c) => VEHICLES.some((v) => v.carrierId === c.id && canCarry(v, vehicle, kg)));
+/** A job to staff: its vehicle type, weight and lane, and optionally its times (for cabotage). */
+export type EligibilityJob = Pick<Load, "vehicle" | "from" | "to"> & Partial<Pick<Load, "id" | "kg" | "pickupAt" | "departedAt">>;
+
+/** The market as the cabotage ledger needs it (lib/cabotage.ts): its loads, the store's anchor and pruned jobs, and a time. */
+export interface EligibilityContext extends LedgerContext {
+  loads: readonly Load[];
+  at: number;
 }
 
-export function vehicleFor(carrierId: string, type: VehicleType, kg = 0) {
-  return VEHICLES.find((v) => v.carrierId === carrierId && canCarry(v, type, kg));
+/**
+ * Carriers that can serve a job: at least one vehicle that carries its type and
+ * weight and may legally run it. Given a load, cross-border and cabotage jobs
+ * need a Community licence above 2.5 t and, for light vans, a tachograph from
+ * 1-7-2026 (lib/checks.ts); with `ctx` as well, that vehicle's cabotage ledger
+ * must allow it (lib/cabotage.ts). Given only a type and weight, the vehicles
+ * alone are checked.
+ */
+export function eligibleCarriers(vehicle: VehicleType, kg?: number): Carrier[];
+export function eligibleCarriers(job: EligibilityJob, ctx?: EligibilityContext): Carrier[];
+export function eligibleCarriers(job: VehicleType | EligibilityJob, arg?: number | EligibilityContext): Carrier[] {
+  const lane = typeof job === "string" ? null : job;
+  const type = typeof job === "string" ? job : job.vehicle;
+  const kg = typeof job === "string" ? (typeof arg === "number" ? arg : 0) : (job.kg ?? 0);
+  const ctx = typeof arg === "object" ? arg : undefined;
+  const at = lane?.departedAt ?? lane?.pickupAt ?? ctx?.at ?? Date.now();
+  return CARRIERS.filter((c) =>
+    VEHICLES.some((v) => {
+      if (v.carrierId !== c.id || !canCarry(v, type, kg)) return false;
+      if (!lane) return true;
+      if (licenceProblems(c, v, lane, at).length) return false;
+      if (!ctx) return true;
+      return !cabotageCheck({ id: lane.id ?? "job", from: lane.from, to: lane.to, pickupAt: at, departedAt: lane.departedAt }, v.id, ctx.loads, ctx).block;
+    }),
+  );
+}
+
+/** The carrier's first vehicle for a load of this type and weight; with `ok`, the first one that also passes it (the rules). */
+export function vehicleFor(carrierId: string, type: VehicleType, kg = 0, ok?: (v: Vehicle) => boolean) {
+  return VEHICLES.find((v) => v.carrierId === carrierId && canCarry(v, type, kg) && (!ok || ok(v)));
 }
 
 let bidSeq = 0;
 export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(bidSeq++).toString(36)}`;
 
-export function buildBids(loads: Load[], t0: number): Bid[] {
+/**
+ * May this vehicle bid on this load, offering to pick it up at `eta`, given the
+ * bids made so far? The store passes the market's rules (licence, tachograph,
+ * cabotage ledger, ZBE); without it only the type and weight are checked.
+ */
+export type BidCheck = (l: Load, v: Vehicle, eta: number, bids: readonly Bid[]) => boolean;
+
+export function buildBids(loads: Load[], t0: number, mayBid: BidCheck = (l, v) => canCarry(v, l.vehicle, l.kg)): Bid[] {
   const bids: Bid[] = [];
   for (const l of loads) {
     if (l.status === "cancelled") continue;
     const r = rng(hash(`bids:${l.id}`));
-    const pool = eligibleCarriers(l.vehicle, l.kg).filter((c) => c.id !== ME.carrierId || l.status !== "open");
-    const n = l.status === "open" ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
+    const open = l.status === "open";
+    // Carriers with a vehicle that may run it at its pickup time (on an open load, not you: those bids are yours to make).
+    const atPickup = (v: Vehicle) => mayBid(l, v, l.pickupAt, bids);
+    const pool = eligibleCarriers(l.vehicle, l.kg).filter((c) => (!open || c.id !== ME.carrierId) && !!vehicleFor(c.id, l.vehicle, l.kg, atPickup));
+    const n = open ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
     const chosen = new Set<string>();
     if (l.carrierId) chosen.add(l.carrierId);
     while (chosen.size < Math.min(pool.length, n + (l.carrierId ? 1 : 0))) chosen.add(r.pick(pool).id);
     for (const cid of chosen) {
       const accepted = cid === l.carrierId;
-      // The winning bid names the truck that is doing the job.
-      const v = (accepted && l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined) ?? vehicleFor(cid, l.vehicle, l.kg);
+      const amount = accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5;
+      const pickupEta = l.pickupAt + r.int(-45, 75) * MIN;
+      // Never before the load was posted (a bid older than its load reads as left over from another one).
+      const at = Math.max(l.createdAt, Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR));
+      // The winning bid names the truck that is doing the job; the others, a truck that may run it at the load's
+      // pickup and, on an open load, at the pickup the bid offers.
+      const ok = open ? (x: Vehicle) => atPickup(x) && mayBid(l, x, pickupEta, bids) : atPickup;
+      const v = (accepted && l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined) ?? vehicleFor(cid, l.vehicle, l.kg, ok);
       if (!v) continue;
       bids.push({
         id: `b-${l.id}-${cid}`,
         loadId: l.id,
         carrierId: cid,
         vehicleId: v.id,
-        amount: accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5,
-        pickupEta: l.pickupAt + r.int(-45, 75) * MIN,
-        at: Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR),
-        status: l.status === "open" ? "pending" : accepted ? "accepted" : "rejected",
+        amount,
+        pickupEta,
+        at,
+        status: open ? "pending" : accepted ? "accepted" : "rejected",
       });
     }
   }
@@ -202,52 +256,77 @@ export function fitsReturn(l: Load, rt: ReturnTrip, vehicleType: VehicleType): b
   return nearFrom && nearTo && Math.abs(l.pickupAt - rt.departAt) <= 6 * HOUR;
 }
 
+type Rand = ReturnType<typeof rng>;
+
+/** How far past t0 the seeded regular dock traffic reaches (the director schedules the rest). */
+export const DOCKS_SEEDED_AHEAD = 10 * HOUR;
+
+/** A door of the warehouse with nothing booked within 15 minutes of [start, end); a random door if all are taken. */
+function freeDoor(appts: readonly DockAppt[], doors: number, start: number, end: number, r: Rand): number {
+  const gap = 15 * MIN;
+  const first = r.int(0, doors - 1);
+  for (let d = 0; d < doors; d++) {
+    const door = (first + d) % doors;
+    if (appts.every((a) => a.door !== door || a.end + gap <= start || end + gap <= a.start)) return door;
+  }
+  return first;
+}
+
+/** The appointments a load needs at a warehouse: loading at its origin, unloading at its destination. */
+export function loadDocks(l: Load, w: Warehouse, appts: readonly DockAppt[], r: Rand): DockAppt[] {
+  const out: DockAppt[] = [];
+  if (l.status === "cancelled") return out;
+  if (l.from === w.place) {
+    const start = l.pickupAt - 30 * MIN;
+    const end = start + 45 * MIN;
+    out.push({ id: `dk-${w.id}-${l.id}-o`, warehouseId: w.id, door: freeDoor(appts, w.doors, start, end, r), start, end, direction: "out", carrierId: l.carrierId ?? "c-txingudi", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+  }
+  if (l.to === w.place) {
+    const start = (l.departedAt ?? l.pickupAt) + driveMs(l);
+    const end = start + 50 * MIN;
+    out.push({ id: `dk-${w.id}-${l.id}-i`, warehouseId: w.id, door: freeDoor([...appts, ...out], w.doors, start, end, r), start, end, direction: "in", carrierId: l.carrierId ?? "c-baltic", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+  }
+  return out;
+}
+
+const REGULARS = CARRIERS.filter((c) => c.id !== "c-labourd");
+
+/**
+ * The rest of a warehouse's traffic (regular suppliers, store deliveries)
+ * starting in [from, to): about two appointments per door every 15 hours.
+ */
+export function regularDocks(w: Warehouse, from: number, to: number, appts: readonly DockAppt[], r: Rand): DockAppt[] {
+  const q15 = 15 * MIN;
+  const n = Math.floor((w.doors * 2 * (to - from)) / (15 * HOUR) + r.next());
+  const out: DockAppt[] = [];
+  for (let k = 0; k < n; k++) {
+    const start = Math.round((from + r.next() * (to - from)) / q15) * q15;
+    const len = r.pick([30, 45, 60, 75]) * MIN;
+    out.push({
+      // Unique per window: the windows of one session never start at the same moment.
+      id: `dk-${w.id}-x${from.toString(36)}-${k}`,
+      warehouseId: w.id,
+      door: freeDoor([...appts, ...out], w.doors, start, start + len, r),
+      start,
+      end: start + len,
+      direction: r.chance(0.5) ? "in" : "out",
+      carrierId: r.pick(REGULARS).id,
+      pallets: r.int(4, 33),
+      status: r.chance(0.07) ? "late" : "scheduled",
+    });
+  }
+  return out;
+}
+
 export function buildDocks(loads: Load[], t0: number): DockAppt[] {
   const appts: DockAppt[] = [];
   for (const w of WAREHOUSES) {
     const r = rng(hash(`docks:${w.id}`));
-    const busy: number[][] = Array.from({ length: w.doors }, () => []);
-    const place = (start: number, len: number) => {
-      for (let d = 0; d < w.doors; d++) {
-        const door = (d + r.int(0, w.doors - 1)) % w.doors;
-        if (busy[door].every((s) => Math.abs(s - start) > len + 15 * MIN)) {
-          busy[door].push(start);
-          return door;
-        }
-      }
-      return r.int(0, w.doors - 1);
-    };
-    for (const l of loads) {
-      if (l.status === "cancelled") continue;
-      const dur = driveMs(l);
-      if (l.from === w.place) {
-        const start = l.pickupAt - 30 * MIN;
-        appts.push({ id: `dk-${w.id}-${l.id}-o`, warehouseId: w.id, door: place(start, 45 * MIN), start, end: start + 45 * MIN, direction: "out", carrierId: l.carrierId ?? "c-txingudi", loadId: l.id, pallets: l.pallets, status: "scheduled" });
-      }
-      if (l.to === w.place) {
-        const eta = (l.departedAt ?? l.pickupAt) + dur;
-        appts.push({ id: `dk-${w.id}-${l.id}-i`, warehouseId: w.id, door: place(eta, 50 * MIN), start: eta, end: eta + 50 * MIN, direction: "in", carrierId: l.carrierId ?? "c-baltic", loadId: l.id, pallets: l.pallets, status: "scheduled" });
-      }
-    }
-    // The rest of the traffic (regular suppliers, store deliveries), spread
-    // around the moment the demo opens so the doors are busy at any hour.
-    const regulars = CARRIERS.filter((c) => c.id !== "c-labourd");
-    const q15 = 15 * MIN;
-    for (let k = 0; k < w.doors * 2; k++) {
-      const start = Math.round((t0 + r.int(-5 * 60, 10 * 60) * MIN) / q15) * q15;
-      const len = r.pick([30, 45, 60, 75]) * MIN;
-      appts.push({
-        id: `dk-${w.id}-x${k}`,
-        warehouseId: w.id,
-        door: place(start, len),
-        start,
-        end: start + len,
-        direction: r.chance(0.5) ? "in" : "out",
-        carrierId: r.pick(regulars).id,
-        pallets: r.int(4, 33),
-        status: r.chance(0.07) ? "late" : "scheduled",
-      });
-    }
+    const here: DockAppt[] = [];
+    for (const l of loads) here.push(...loadDocks(l, w, here, r));
+    // Spread around the moment the demo opens so the doors are busy at any hour.
+    here.push(...regularDocks(w, t0 - 5 * HOUR, t0 + DOCKS_SEEDED_AHEAD, here, r));
+    appts.push(...here);
   }
   return appts.sort((a, b) => a.start - b.start);
 }

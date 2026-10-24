@@ -2,7 +2,9 @@
 
 import { Repeat, Star, Truck } from "lucide-react";
 import { useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
+import { blockReason, DemoNote, FictionalTag, useDeadlines, useRuleCtx } from "@/components/load-bits";
 import { Button, Card, Chip, EcoBadge, Empty, Field, inputClass, Progress, SectionTitle } from "@/components/ui";
 import { CARRIER, DRIVER, ME, VEHICLE, VEHICLES } from "@/data/companies";
 import { route } from "@/data/network";
@@ -11,7 +13,8 @@ import { driveMs, fitsReturn, HOUR } from "@/data/seed";
 import type { Load, ReturnTrip, Vehicle } from "@/data/types";
 import { useI18n } from "@/i18n/client";
 import { LOCALE_NAMES } from "@/i18n/config";
-import { hasDgtLabel } from "@/lib/checks";
+import { runVerdict } from "@/lib/cabotage";
+import { hasDgtLabel, licenceLocalName } from "@/lib/checks";
 import { fromMadridInput, toMadridInput } from "@/lib/format";
 import { VEHICLE_SPECS } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
@@ -33,18 +36,23 @@ export function Fleet() {
   const jobOf = (v: Vehicle) => loads.find((l) => l.vehicleId === v.id && (l.status === "assigned" || l.status === "inTransit"));
   const mine = returns.filter((r) => r.carrierId === me.id);
   const market = returns.filter((r) => r.carrierId !== me.id && r.status === "open");
-  const licence = { MDL: d.fleet.licenceMDL, MDP: d.fleet.licenceMDP, community: d.fleet.licenceCommunity }[me.licence];
+  // The licence by the name its issuing country gives it.
+  const licence = me.licence === "community" ? d.fleet.licenceCommunity.replace("{{name}}", licenceLocalName(me)) : { MDL: d.fleet.licenceMDL, MDP: d.fleet.licenceMDP, LTI: d.fleet.licenceLTI }[me.licence];
 
   return (
     <Page>
-      <PageHeader title={d.fleet.title} lead={d.fleet.lead.replace("{{carrier}}", me.name).replace("{{n}}", String(fleet.length)).replace("{{base}}", place(me.base))} />
+      {/* The same header the shell shows while the market starts (intro.ts). */}
+      <PageHeader {...screenIntro("fleet", d, place)} />
       <Card className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 p-4">
         <div className="flex items-center gap-3">
           <span className="inline-flex size-11 items-center justify-center rounded-xl bg-signal-soft text-signal">
             <Truck className="size-5" aria-hidden />
           </span>
           <div>
-            <div className="font-bold text-ink">{me.name}</div>
+            <div className="flex items-center gap-1.5 font-bold text-ink">
+              {me.name}
+              <FictionalTag />
+            </div>
             <div className="text-xs text-ink-3">
               {licence} · {d.fleet.since.replace("{{year}}", String(me.founded))}
             </div>
@@ -134,6 +142,8 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
   const { d, f, place, n } = useI18n();
   const role = useMarket((s) => s.role);
   const bookOnReturn = useMarket((s) => s.bookOnReturn);
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
   const v = VEHICLE.get(rt.vehicleId);
   const fits = v ? loads.filter((l) => fitsReturn(l, rt, v.type)) : [];
   const matched = rt.matchedLoadId ? loads.find((l) => l.id === rt.matchedLoadId) : undefined;
@@ -141,7 +151,12 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
     <Card className={cn("p-3.5", own && "border-lime/50")}>
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          {!own ? <div className="truncate text-xs font-semibold text-ink-3">{CARRIER.get(rt.carrierId)?.name}</div> : null}
+          {!own ? (
+            <div className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-ink-3">
+              <span className="truncate">{CARRIER.get(rt.carrierId)?.name}</span>
+              <FictionalTag />
+            </div>
+          ) : null}
           <div className="leading-snug font-bold text-pretty text-ink">
             {place(rt.from)} → {place(rt.to)}
           </div>
@@ -163,19 +178,26 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
         <ul className="mt-2.5 space-y-1.5">
           {fits.slice(0, 3).map((l) => {
             const amount = round5(l.target * (1 - rt.discount));
+            // The return trip's own vehicle runs the load: licence, tachograph and cabotage apply to it.
+            const reason = v ? blockReason(runVerdict(l, v, rules.loads, rules), d, day) : null;
             return (
               <li key={l.id} className="flex flex-wrap items-center gap-2 rounded-xl bg-lime-soft/70 px-2.5 py-2 text-[0.78rem]">
                 <span className="min-w-0 flex-1 text-ink-2">
                   <span className="font-mono font-semibold text-ink">{l.id}</span> · {place(l.from)} → {place(l.to)} · {d.common.palletsN.replace("{{n}}", String(l.pallets))}
                   <span className="block text-[0.7rem] text-lime">{d.fleet.saving.replace("{{amount}}", f.money(l.target - amount))}</span>
+                  {reason ? <span className="block text-[0.7rem] font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</span> : null}
                 </span>
-                {own && role !== "shipper" ? (
-                  <Button size="sm" variant="lime" onClick={() => bookOnReturn(l.id, rt.id)}>
-                    {d.fleet.take.replace("{{load}}", l.id).replace("{{amount}}", f.money(amount))}
-                  </Button>
-                ) : (
-                  <span className="tnum font-bold text-ink">{f.money(amount)}</span>
-                )}
+                <span className="text-right">
+                  {own && role !== "shipper" ? (
+                    <Button size="sm" variant="lime" disabled={!!reason} onClick={() => bookOnReturn(l.id, rt.id)}>
+                      {d.fleet.take.replace("{{load}}", l.id).replace("{{amount}}", f.money(amount))}
+                    </Button>
+                  ) : (
+                    <span className="tnum font-bold text-ink">{f.money(amount)}</span>
+                  )}
+                  {/* ink-2: ink-3 is below 4.5:1 on the lime tile in dark mode. */}
+                  <DemoNote short className="mt-0.5 text-ink-2" />
+                </span>
               </li>
             );
           })}

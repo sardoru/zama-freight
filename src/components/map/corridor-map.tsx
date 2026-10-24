@@ -1,37 +1,40 @@
 "use client";
 
 // The live 3D map: MapLibre GL draws the basemap (vector tiles, 3D buildings,
-// relief, sky and a sun placed where it really is), deck.gl draws the market
-// on top, interleaved in the same WebGL context so trucks and arcs sit
-// between the buildings: trucks with trails, open loads as arcs, empty return
-// trips, warehouses as columns as tall as they are full.
+// relief, sky and a sun placed where it really is) and deck.gl draws the market
+// on top, interleaved in the same WebGL context so trucks and arcs sit between
+// the buildings (deck-layers.ts, a separate chunk loaded after the basemap's
+// first idle).
+//
+// The map is made once per app session. MapHost keeps this component mounted
+// while other screens are shown (inside <Activity mode="hidden">), so tiles,
+// shaders and the deck.gl overlay are not rebuilt, or leaked, on every visit.
+// Hiding unmounts the effects below, which pauses everything; showing the screen
+// again resumes it. The map is removed only when the app layout itself goes away
+// (or a restored WebGL context asks for a fresh one: onRestart).
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { PickingInfo } from "@deck.gl/core";
-import { TripsLayer } from "@deck.gl/geo-layers";
-import { ArcLayer, ColumnLayer, PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
-import { MapLibreOverlay } from "@deck.gl/maplibre";
-import { AttributionControl, Map as MLMap, NavigationControl, setWorkerUrl, type LngLatBoundsLike, type LngLatLike } from "maplibre-gl";
-import { useEffect, useRef } from "react";
-import { VEHICLE } from "@/data/companies";
-import { networkLines, route } from "@/data/network";
-import { PLACE_IDS, PLACES, VIEWS, type PlaceId, type ViewId } from "@/data/places";
+import { getVersion, Map as MLMap, NavigationControl, setWorkerUrl, type LngLatBoundsLike, type LngLatLike } from "maplibre-gl";
+import { useEffect, useInsertionEffect, useLayoutEffect, useRef } from "react";
+import { route } from "@/data/network";
+import { PLACE_IDS, PLACES, VIEWS, type ViewId } from "@/data/places";
 import { driveMs } from "@/data/seed";
-import type { Load, ReturnTrip, Warehouse } from "@/data/types";
-import { buildBins, occupancy, WAREHOUSES } from "@/data/warehouses";
 import type { Locale } from "@/i18n/config";
-import { makeFmt } from "@/lib/format";
-import { along, bbox, type LngLat } from "@/lib/geo";
+import { along, bbox } from "@/lib/geo";
 import { lightingFor, presetInstant, solarPosition, type Lighting, type SunPosition, type TimePreset } from "@/lib/sun";
 import { simNow, useMarket, type Settings } from "@/store/market";
+import type { DeckHandle, Scene } from "./deck-layers";
 import { buildStyle, fallbackStyle, lightSpec, skySpec, TERRAIN } from "./style";
+import { metersPerPixel, type MapStatus, type Selection } from "./types";
+import { webgl2 } from "./webgl";
 
-export type Selection = { kind: "load" | "return" | "warehouse"; id: string } | null;
-export type MapStatus = "loading" | "ready" | "fallback" | "nowebgl";
+export type { MapStatus, Selection } from "./types";
 
 export interface CorridorMapProps {
   dark: boolean;
   lang: Locale;
   settings: Settings;
+  /** MapLibre's own UI strings (zoom buttons, compass, the canvas label), from the dictionary. */
+  locale: Record<string, string>;
   /** Fly to a preset view; `n` makes repeated requests for the same view count. */
   flyTo: { view: ViewId; n: number } | null;
   /** Frame a load (its truck if it is moving, otherwise its route). */
@@ -42,90 +45,25 @@ export interface CorridorMapProps {
   onSun: (s: SunPosition) => void;
   /** The WebGL context was lost and restored: remount the map on a fresh canvas. */
   onRestart: () => void;
+  /** The reader panned, zoomed, turned or tilted the map for the first time. */
+  onInteract: () => void;
   /** Names for tooltips, already in the reader's language. */
   tooltip: (info: Selection) => string | null;
 }
 
-// MapLibre 6 ships its worker as a separate ES module; scripts/copy-worker.mjs
-// copies it into public/ on install so the bundler doesn't have to find it.
-const WORKER_URL = "/vendor/maplibre-gl-worker.mjs";
+// MapLibre 6 ships its worker as a separate ES module. scripts/copy-worker.mjs copies
+// it into public/ under the package version, so it can be cached as immutable
+// (next.config.ts) and a new MapLibre gets a new URL.
+const WORKER_URL = `/vendor/maplibre-gl-worker-${getVersion()}.mjs`;
 const CENTER = PLACES.irun.lnglat;
-
-type RGB = [number, number, number];
-type RGBA = [number, number, number, number];
-
-function palette(dark: boolean) {
-  return dark
-    ? {
-        truck: [255, 138, 61] as RGB,
-        electric: [52, 211, 153] as RGB,
-        lane: [45, 212, 191] as RGB,
-        laneTo: [167, 243, 208] as RGB,
-        instant: [96, 165, 250] as RGB,
-        instantTo: [191, 219, 254] as RGB,
-        ret: [163, 230, 53] as RGB,
-        retTo: [236, 252, 203] as RGB,
-        wh: [167, 139, 250] as RGB,
-        road: [86, 104, 126] as RGB,
-        select: [255, 255, 255] as RGB,
-        text: [231, 237, 244] as RGB,
-        halo: [9, 13, 18] as RGB,
-      }
-    : {
-        truck: [228, 98, 12] as RGB,
-        electric: [4, 120, 87] as RGB,
-        lane: [12, 143, 129] as RGB,
-        laneTo: [6, 95, 70] as RGB,
-        instant: [29, 95, 209] as RGB,
-        instantTo: [30, 64, 175] as RGB,
-        ret: [77, 138, 11] as RGB,
-        retTo: [54, 83, 20] as RGB,
-        wh: [109, 63, 217] as RGB,
-        road: [150, 140, 125] as RGB,
-        select: [13, 18, 24] as RGB,
-        text: [13, 18, 24] as RGB,
-        halo: [248, 247, 243] as RGB,
-      };
-}
-
-const withAlpha = (c: RGB, a: number): RGBA => [c[0], c[1], c[2], a];
-
-function webgl2(): boolean {
-  try {
-    const gl = document.createElement("canvas").getContext("webgl2");
-    // Hand the probe's context back: browsers cap how many can be alive at once.
-    gl?.getExtension("WEBGL_lose_context")?.loseContext();
-    return !!gl;
-  } catch {
-    return false;
-  }
-}
+/** A fast truck on the motorway, m/s of market time: sets how often the trucks need redrawing. */
+const TRUCK_SPEED = 25;
 
 /** Light and sky for a time preset (or the market clock when "live"). */
 export function lightingAt(time: TimePreset, simMs: number, dark: boolean): Lighting {
   const date = time === "live" ? new Date(simMs) : presetInstant(new Date(simMs), time, CENTER[1], CENTER[0]);
   return lightingFor(solarPosition(date, CENTER[1], CENTER[0]), dark);
 }
-
-interface Truck {
-  load: Load;
-  path: LngLat[];
-  cum: number[];
-  ts: number[];
-  dep: number;
-  dur: number;
-  electric: boolean;
-}
-
-interface Derived {
-  loads: Load[] | null;
-  returns: ReturnTrip[] | null;
-  trucks: Truck[];
-  open: Load[];
-  rts: ReturnTrip[];
-}
-
-const network = networkLines();
 
 /** Every place on the map, for framing "the whole corridor". */
 const CORRIDOR_POINTS = PLACE_IDS.map((id) => PLACES[id].lnglat);
@@ -182,26 +120,68 @@ function corridorCamera(m: MLMap): Camera {
   m.jumpTo(was);
   return cam;
 }
-const fill = new Map(WAREHOUSES.map((w) => [w.id, occupancy(buildBins(w))]));
 
 export default function CorridorMap(props: CorridorMapProps) {
   const el = useRef<HTMLDivElement>(null);
   const live = useRef(props);
   const map = useRef<MLMap | null>(null);
-  const overlay = useRef<MapLibreOverlay | null>(null);
+  const deck = useRef<DeckHandle | null>(null);
+  const deckLoading = useRef(false);
   const mode = useRef<"vector" | "fallback">("vector");
   const styleReady = useRef(false);
-  const derived = useRef<Derived>({ loads: null, returns: null, trucks: [], open: [], rts: [] });
+  const shown = useRef(false);
+  const narrow = useRef(false);
   const fontFamily = useRef("system-ui, sans-serif");
   const t0 = useRef(0);
   const styled = useRef<{ dark: boolean; lang: Locale } | null>(null);
+  const flown = useRef(0);
+  const focused = useRef(0);
+  const loop = useRef<{ on: boolean; raf: number; timer?: ReturnType<typeof setTimeout> }>({ on: false, raf: 0 });
+  // Timers and window listeners made with the map, undone with it.
+  const disposers = useRef<(() => void)[]>([]);
 
   useEffect(() => {
     live.current = props;
   });
 
-  // Create the map once.
+  // Final removal only: insertion effects outlive <Activity> hiding (and StrictMode's replay).
+  useInsertionEffect(() => () => destroy(), []);
+
+  // Hidden, the container had no size; repaint at the right one before the browser paints.
+  useLayoutEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    m.resize();
+    m.redraw();
+  }, []);
+
+  // Create the map on the first show; resume on every show, pause on every hide.
   useEffect(() => {
+    if (!map.current) create();
+    shown.current = true;
+    deck.current?.setActive(true);
+    refresh();
+    kick();
+    const unsubscribe = useMarket.subscribe((s, prev) => {
+      if (s.loads === prev.loads && s.returns === prev.returns && s.clock === prev.clock) return;
+      refresh();
+      kick();
+    });
+    const onVisibility = () => kick();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      shown.current = false;
+      unsubscribe();
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopLoop();
+      deck.current?.setActive(false);
+      map.current?.stop();
+    };
+    // Built once; later prop changes are applied by the effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function create() {
     const container = el.current;
     if (!container) return;
     if (!webgl2()) {
@@ -215,6 +195,7 @@ export default function CorridorMap(props: CorridorMapProps) {
 
     const p = live.current;
     const v = VIEWS.corridor;
+    narrow.current = container.clientWidth < 640;
     const lighting = lightingAt(p.settings.time, t0.current, p.dark);
     let m: MLMap;
     try {
@@ -233,6 +214,8 @@ export default function CorridorMap(props: CorridorMapProps) {
           [-3.4, 42.6],
           [-0.2, 44.3],
         ],
+        locale: p.locale,
+        // The credits are drawn by the app layout from the dictionaries (credits.tsx), with the first paint.
         attributionControl: false,
         canvasContextAttributes: { antialias: true },
         fadeDuration: 150,
@@ -250,54 +233,32 @@ export default function CorridorMap(props: CorridorMapProps) {
     const screen = layout();
     if (screen === "laptop" || screen === "desktop") m.setPadding({ left: screen === "desktop" ? 284 : 0, right: 380, top: 60, bottom: 0 });
     m.jumpTo(corridorCamera(m));
-    m.addControl(new AttributionControl({ compact: true }), "bottom-right");
     m.addControl(new NavigationControl({ visualizePitch: true }), "bottom-right");
     p.onSun(lighting.sun);
 
-    const ov = new MapLibreOverlay({
-      interleaved: true,
-      layers: [],
-      // Trucks move 15-100 px/s at street zoom; give the pointer some slack.
-      pickingRadius: 8,
-      onClick: (info: PickingInfo) => live.current.onSelect(pick(info)),
-      onHover: (info: PickingInfo) => {
-        m.getCanvas().style.cursor = info.object ? "pointer" : "";
-      },
-      getTooltip: (info: PickingInfo) => {
-        const sel = pick(info);
-        const text = sel ? live.current.tooltip(sel) : null;
-        return text
-          ? {
-              text,
-              style: {
-                background: "var(--z-surface)",
-                color: "var(--z-ink)",
-                border: "1px solid var(--z-line)",
-                borderRadius: "10px",
-                padding: "6px 9px",
-                fontFamily: "var(--font-manrope), system-ui",
-                fontSize: "12px",
-                fontWeight: "600",
-                boxShadow: "var(--z-shadow)",
-              },
-            }
-          : null;
-      },
+    for (const type of ["dragstart", "zoomstart", "rotatestart", "pitchstart"] as const) {
+      m.on(type, (e) => {
+        if (e.originalEvent) live.current.onInteract();
+      });
+    }
+    m.on("zoom", refresh);
+    m.on("resize", () => {
+      narrow.current = m.getContainer().clientWidth < 640;
+      refresh();
     });
-    overlay.current = ov;
-    m.addControl(ov);
 
     // If the vector tiles can't be reached, switch to the schematic corridor.
     let gotTiles = false;
     let tileErrors = 0;
     const toFallback = () => {
-      if (mode.current === "fallback" || !map.current) return;
+      if (mode.current === "fallback" || map.current !== m) return;
       mode.current = "fallback";
       styleReady.current = false;
       const q = live.current;
       const l = lightingAt(q.settings.time, simNow(useMarket.getState().clock), q.dark);
       m.setStyle(fallbackStyle({ dark: q.dark, lighting: l, terrain: q.settings.terrain }), { diff: false });
       q.onStatus("fallback");
+      refresh();
     };
     m.on("sourcedata", (e) => {
       if (e.sourceId === "omt" && e.tile) gotTiles = true;
@@ -319,7 +280,7 @@ export default function CorridorMap(props: CorridorMapProps) {
     let watchdog = arm();
     // Back online after a fallback: try the real basemap again.
     const retry = () => {
-      if (mode.current !== "fallback" || !map.current) return;
+      if (mode.current !== "fallback" || map.current !== m) return;
       mode.current = "vector";
       gotTiles = false;
       tileErrors = 0;
@@ -330,6 +291,7 @@ export default function CorridorMap(props: CorridorMapProps) {
       const l = lightingAt(q.settings.time, simNow(useMarket.getState().clock), q.dark);
       m.setStyle(buildStyle({ dark: q.dark, lang: q.lang, lighting: l, buildings: q.settings.layers.buildings, terrain: q.settings.terrain }), { diff: false });
       q.onStatus("loading");
+      refresh();
     };
     window.addEventListener("online", retry);
     // deck.gl can't follow MapLibre through a lost WebGL context (its buffers and programs die with
@@ -347,33 +309,111 @@ export default function CorridorMap(props: CorridorMapProps) {
       if (mode.current === "vector" && gotTiles) live.current.onStatus("ready");
     });
 
-    // deck.gl layers, redrawn ~30 times a second so trucks glide.
-    let raf = 0;
-    let last = 0;
-    const frame = (t: number) => {
-      raf = requestAnimationFrame(frame);
-      if (t - last < 33 || document.hidden) return;
-      last = t;
-      ov.setProps({ layers: layers() });
-    };
-    raf = requestAnimationFrame(frame);
-
-    return () => {
-      cancelAnimationFrame(raf);
+    // The market overlay waits for the basemap: its first idle, or 8 s at the latest.
+    m.once("idle", () => void loadDeck(m));
+    const late = setTimeout(() => void loadDeck(m), 8_000);
+    disposers.current.push(() => {
       clearTimeout(watchdog);
+      clearTimeout(late);
       window.removeEventListener("online", retry);
-      overlay.current = null;
-      map.current = null;
-      try {
-        m.removeControl(ov);
-      } catch {
-        /* already gone */
-      }
-      m.remove();
+    });
+  }
+
+  async function loadDeck(m: MLMap) {
+    if (deckLoading.current) return;
+    deckLoading.current = true;
+    try {
+      const { createDeck } = await import("./deck-layers");
+      if (map.current !== m) return;
+      deck.current = createDeck(m, { onSelect: (s) => live.current.onSelect(s), tooltip: (s) => live.current.tooltip(s) }, t0.current);
+      deck.current.setActive(shown.current);
+      refresh();
+      kick();
+    } catch (err) {
+      // The basemap still works; the market just isn't drawn on it.
+      console.warn("map: the market overlay failed to load", err);
+    }
+  }
+
+  function destroy() {
+    stopLoop();
+    disposers.current.forEach((f) => f());
+    disposers.current = [];
+    deck.current?.destroy();
+    deck.current = null;
+    const m = map.current;
+    map.current = null;
+    m?.remove();
+  }
+
+  /** What the deck.gl layers are drawn from right now. */
+  function scene(): Scene | null {
+    const m = map.current;
+    if (!m) return null;
+    const { settings, dark, lang, selection } = live.current;
+    const s = useMarket.getState();
+    return {
+      layers: settings.layers,
+      dark,
+      lang,
+      selection,
+      loads: s.loads,
+      returns: s.returns,
+      zoom: m.getZoom(),
+      narrow: narrow.current,
+      fallback: mode.current === "fallback",
+      fontFamily: fontFamily.current,
+      still: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     };
-    // Built once; later prop changes are applied by the effects below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
+
+  function refresh() {
+    const d = deck.current;
+    const sc = d ? scene() : null;
+    if (d && sc) d.update(sc);
+  }
+
+  // Trucks glide only while they are shown, on the road, the clock runs and the
+  // screen is visible. A frame is drawn as often as they move half a pixel on
+  // screen: a few times a second over the whole corridor, 30 times close up.
+  function running() {
+    return shown.current && !document.hidden && useMarket.getState().clock.speed > 0 && !!deck.current?.moving();
+  }
+
+  function interval() {
+    const m = map.current;
+    if (!m) return 1000;
+    const pxPerSecond = (useMarket.getState().clock.speed * TRUCK_SPEED) / metersPerPixel(m.getZoom());
+    return Math.min(1000, Math.max(33, 500 / Math.max(pxPerSecond, 0.5)));
+  }
+
+  function kick() {
+    const L = loop.current;
+    if (L.on || !running()) return;
+    L.on = true;
+    L.raf = requestAnimationFrame(frame);
+  }
+
+  function frame() {
+    const L = loop.current;
+    L.raf = 0;
+    if (!running()) {
+      L.on = false;
+      return;
+    }
+    deck.current?.tick(simNow(useMarket.getState().clock));
+    L.timer = setTimeout(() => {
+      L.raf = requestAnimationFrame(frame);
+    }, Math.max(0, interval() - 16));
+  }
+
+  function stopLoop() {
+    const L = loop.current;
+    if (L.timer) clearTimeout(L.timer);
+    if (L.raf) cancelAnimationFrame(L.raf);
+    L.on = false;
+    L.raf = 0;
+  }
 
   /** Terrain, building visibility, light and sky from the current settings. */
   function applySettings() {
@@ -413,6 +453,13 @@ export default function CorridorMap(props: CorridorMapProps) {
     applySettings();
   }, [props.settings.terrain, props.settings.time, props.settings.layers.buildings]);
 
+  // What the market overlay shows.
+  useEffect(() => {
+    refresh();
+    kick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.selection, props.settings.layers, props.dark, props.lang]);
+
   // The live sun moves with the market clock.
   useEffect(() => {
     if (props.settings.time !== "live") return;
@@ -420,9 +467,11 @@ export default function CorridorMap(props: CorridorMapProps) {
     return () => clearInterval(id);
   }, [props.settings.time]);
 
+  // Camera requests count once: showing the screen again must not replay the last one.
   useEffect(() => {
     const m = map.current;
-    if (!m || !props.flyTo) return;
+    if (!m || !props.flyTo || props.flyTo.n === flown.current) return;
+    flown.current = props.flyTo.n;
     const v = VIEWS[props.flyTo.view];
     const w = m.getContainer().clientWidth;
     const cam: Camera =
@@ -432,7 +481,8 @@ export default function CorridorMap(props: CorridorMapProps) {
 
   useEffect(() => {
     const m = map.current;
-    if (!m || !props.focus) return;
+    if (!m || !props.focus || props.focus.n === focused.current) return;
+    focused.current = props.focus.n;
     const l = useMarket.getState().loads.find((x) => x.id === props.focus?.loadId);
     if (!l) return;
     const r = route(l.from, l.to);
@@ -458,263 +508,11 @@ export default function CorridorMap(props: CorridorMapProps) {
     }
   }, [props.focus]);
 
-  /** What a deck.gl pick refers to. */
-  function pick(info: PickingInfo): Selection {
-    const o = info.object as { load?: Load; id?: string } | undefined;
-    if (!o || !info.layer) return null;
-    const id = info.layer.id;
-    if (id === "trucks" || id === "truck-halo" || id === "trails") return { kind: "load", id: (o as Truck).load.id };
-    if (id === "lanes") return { kind: "load", id: (o as Load).id };
-    if (id === "returns") return { kind: "return", id: (o as ReturnTrip).id };
-    if (id === "warehouses") return { kind: "warehouse", id: (o as Warehouse).id };
-    return null;
-  }
-
-  function derive(loads: Load[], returns: ReturnTrip[]): Derived {
-    const d = derived.current;
-    if (d.loads === loads && d.returns === returns) return d;
-    const base = t0.current;
-    const trucks: Truck[] = [];
-    for (const l of loads) {
-      if (l.status !== "inTransit" || !l.departedAt) continue;
-      const r = route(l.from, l.to);
-      const dur = driveMs(l);
-      const total = r.cum[r.cum.length - 1] || 1;
-      trucks.push({
-        load: l,
-        path: r.path,
-        cum: r.cum,
-        ts: r.cum.map((c) => (l.departedAt! - base + (c / total) * dur) / 1000),
-        dep: l.departedAt,
-        dur,
-        electric: !!(l.vehicleId && VEHICLE.get(l.vehicleId)?.electric),
-      });
-    }
-    const next = { loads, returns, trucks, open: loads.filter((l) => l.status === "open"), rts: returns.filter((r) => r.status === "open") };
-    derived.current = next;
-    return next;
-  }
-
-  function layers() {
-    const m = map.current;
-    if (!m) return [];
-    const { settings, dark, selection } = live.current;
-    const s = useMarket.getState();
-    const now = simNow(s.clock);
-    const d = derive(s.loads, s.returns);
-    const c = palette(dark);
-    const fallback = mode.current === "fallback";
-    const zoom = m.getZoom();
-    const mpp = (156543.03 * Math.cos((CENTER[1] * Math.PI) / 180)) / 2 ** zoom;
-    const colR = Math.min(700, Math.max(45, mpp * 9));
-    const colH = (id: string) => colR * (1.2 + (fill.get(id as Warehouse["id"]) ?? 0) * 3.2);
-    const time = (now - t0.current) / 1000;
-    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 380);
-    const selLoad = selection?.kind === "load" ? s.loads.find((l) => l.id === selection.id) : undefined;
-    const L = settings.layers;
-    const out = [];
-
-    if (L.network || fallback) {
-      out.push(
-        new PathLayer({
-          id: "network",
-          data: network,
-          getPath: (r) => r.path,
-          getColor: (r) => withAlpha(c.road, fallback ? (r.road === "motorway" ? 230 : 150) : r.road === "motorway" ? 120 : 70),
-          getWidth: (r) => (r.road === "motorway" ? 3 : r.road === "road" ? 1.8 : 1.2),
-          widthUnits: "pixels",
-          capRounded: true,
-          jointRounded: true,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-          updateTriggers: { getColor: [dark, fallback] },
-        }),
-      );
-    }
-
-    if (selLoad) {
-      const r = route(selLoad.from, selLoad.to);
-      out.push(
-        new PathLayer({
-          id: "selected-route",
-          data: [r.path],
-          getPath: (p) => p,
-          getColor: withAlpha(c.select, 200),
-          getWidth: 6,
-          widthUnits: "pixels",
-          capRounded: true,
-          jointRounded: true,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-        }),
-        new ScatterplotLayer({
-          id: "selected-ends",
-          data: [PLACES[selLoad.from].lnglat, PLACES[selLoad.to].lnglat],
-          getPosition: (p) => p,
-          getFillColor: withAlpha(c.select, 255),
-          getLineColor: withAlpha(c.halo, 255),
-          getRadius: 7,
-          radiusUnits: "pixels",
-          stroked: true,
-          lineWidthUnits: "pixels",
-          getLineWidth: 2,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-        }),
-      );
-    }
-
-    if (L.lanes) {
-      out.push(
-        new ArcLayer<Load>({
-          id: "lanes",
-          data: d.open,
-          getSourcePosition: (l) => PLACES[l.from].lnglat,
-          getTargetPosition: (l) => PLACES[l.to].lnglat,
-          getSourceColor: (l) => withAlpha(l.mode === "instant" ? c.instant : c.lane, l.id === selLoad?.id ? 255 : 210),
-          getTargetColor: (l) => withAlpha(l.mode === "instant" ? c.instantTo : c.laneTo, l.id === selLoad?.id ? 255 : 210),
-          getWidth: (l) => (l.id === selLoad?.id ? 5 : 2.4),
-          getHeight: 0.26,
-          widthUnits: "pixels",
-          pickable: true,
-          autoHighlight: true,
-          highlightColor: [255, 255, 255, 90],
-          updateTriggers: { getWidth: selLoad?.id, getSourceColor: [selLoad?.id, dark], getTargetColor: [selLoad?.id, dark] },
-        }),
-      );
-    }
-
-    if (L.returns) {
-      out.push(
-        new ArcLayer<ReturnTrip>({
-          id: "returns",
-          data: d.rts,
-          getSourcePosition: (r) => PLACES[r.from].lnglat,
-          getTargetPosition: (r) => PLACES[r.to].lnglat,
-          getSourceColor: withAlpha(c.ret, 235),
-          getTargetColor: withAlpha(c.retTo, 235),
-          getWidth: (r) => (selection?.kind === "return" && selection.id === r.id ? 6 : 3.2),
-          getHeight: 0.18,
-          getTilt: 18,
-          widthUnits: "pixels",
-          pickable: true,
-          autoHighlight: true,
-          highlightColor: [255, 255, 255, 90],
-          updateTriggers: { getWidth: selection?.id, getSourceColor: dark, getTargetColor: dark },
-        }),
-      );
-    }
-
-    if (L.warehouses) {
-      out.push(
-        new ColumnLayer<Warehouse>({
-          id: "warehouses",
-          data: WAREHOUSES,
-          getPosition: (w) => PLACES[w.place].lnglat,
-          getElevation: (w) => colH(w.id),
-          getFillColor: (w) => withAlpha(c.wh, selection?.kind === "warehouse" && selection.id === w.id ? 255 : 200),
-          radius: colR,
-          diskResolution: 6,
-          angle: 30,
-          extruded: true,
-          pickable: true,
-          autoHighlight: true,
-          highlightColor: [255, 255, 255, 70],
-          material: { ambient: 0.55, diffuse: 0.6, shininess: 24 },
-          updateTriggers: { getElevation: Math.round(colR), getFillColor: [selection?.id, dark] },
-        }),
-      );
-    }
-
-    if (L.trucks) {
-      out.push(
-        new TripsLayer<Truck>({
-          id: "trails",
-          data: d.trucks,
-          getPath: (t) => t.path,
-          getTimestamps: (t) => t.ts,
-          getColor: (t) => (t.electric ? c.electric : c.truck),
-          currentTime: time,
-          trailLength: 520,
-          fadeTrail: true,
-          widthMinPixels: 4,
-          capRounded: true,
-          jointRounded: true,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-          updateTriggers: { getColor: dark },
-        }),
-        new ScatterplotLayer<Truck>({
-          id: "truck-halo",
-          data: d.trucks,
-          getPosition: (t) => along(t.path, t.cum, (now - t.dep) / t.dur).point,
-          getFillColor: (t) => withAlpha(t.electric ? c.electric : c.truck, Math.round(50 + 50 * pulse)),
-          getRadius: 11 + 5 * pulse,
-          radiusUnits: "pixels",
-          // The halo is the bigger target: moving trucks are hard to hit on the 6 px dot alone.
-          pickable: true,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-          updateTriggers: { getPosition: time, getFillColor: [pulse, dark], getRadius: pulse },
-        }),
-        new ScatterplotLayer<Truck>({
-          id: "trucks",
-          data: d.trucks,
-          getPosition: (t) => along(t.path, t.cum, (now - t.dep) / t.dur).point,
-          getFillColor: (t) => (t.electric ? c.electric : c.truck),
-          getLineColor: withAlpha(c.halo, 255),
-          getRadius: (t) => (t.load.id === selLoad?.id ? 8 : 6),
-          radiusUnits: "pixels",
-          stroked: true,
-          getLineWidth: 2,
-          lineWidthUnits: "pixels",
-          pickable: true,
-          parameters: { depthCompare: "always", depthWriteEnabled: false },
-          updateTriggers: { getPosition: time, getRadius: selLoad?.id, getFillColor: dark, getLineColor: dark },
-        }),
-      );
-    }
-
-    // Labels: warehouses always; every place when the basemap (and its labels) is missing.
-    const labels: { pos: [number, number, number]; text: string; size: number; tone: RGB }[] = [];
-    // Fewer names when zoomed out on a small screen, so they don't pile up.
-    const narrow = m.getContainer().clientWidth < 640;
-    if (L.warehouses && zoom >= (narrow ? 11.6 : 10.4)) {
-      const pct = makeFmt(live.current.lang).pct;
-      for (const w of WAREHOUSES) {
-        const [lng, lat] = PLACES[w.place].lnglat;
-        labels.push({ pos: [lng, lat, colH(w.id) + colR * 0.6], text: `${w.name} · ${pct(fill.get(w.id) ?? 0)}`, size: 12, tone: c.wh });
-      }
-    }
-    if (fallback) {
-      for (const id of PLACE_IDS) {
-        const pl = PLACES[id as PlaceId];
-        if (!pl.hub && zoom < (narrow ? 12 : 11)) continue;
-        labels.push({ pos: [pl.lnglat[0], pl.lnglat[1], 0], text: pl.names[live.current.lang], size: pl.hub ? 15 : 12, tone: c.text });
-      }
-    }
-    if (labels.length) out.push(
-      new TextLayer<(typeof labels)[number]>({
-        id: "labels",
-        data: labels,
-        getPosition: (x) => x.pos,
-        getText: (x) => x.text,
-        getSize: (x) => x.size,
-        getColor: (x) => withAlpha(x.tone, 255),
-        getPixelOffset: [0, -10],
-        fontFamily: fontFamily.current,
-        fontWeight: 700,
-        characterSet: "auto",
-        fontSettings: { sdf: true, fontSize: 64, buffer: 8 },
-        outlineWidth: 4,
-        outlineColor: withAlpha(c.halo, 230),
-        billboard: true,
-        parameters: { depthCompare: "always", depthWriteEnabled: false },
-        updateTriggers: { getPosition: Math.round(colR), getColor: dark },
-      }),
-    );
-    return out;
-  }
-
   // MapLibre's stylesheet makes its container position:relative (unlayered CSS beats
-  // Tailwind's layers), so the container fills a positioned wrapper instead.
+  // Tailwind's layers), so the container fills a positioned wrapper instead. The zoom
+  // buttons sit above the credits' (i) button (important, for the same reason).
   return (
-    <div className="absolute inset-0">
+    <div className="absolute inset-0 [&_.maplibregl-ctrl-bottom-right]:bottom-9!">
       <div ref={el} className="h-full w-full" />
     </div>
   );

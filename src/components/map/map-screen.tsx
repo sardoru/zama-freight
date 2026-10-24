@@ -23,7 +23,7 @@ import {
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useIsDark } from "@/components/theme";
 import { Button, Chip, EcoBadge, Progress, Sheet, Spinner, StatusChip, Switch } from "@/components/ui";
 import { CARRIER, DRIVER, VEHICLE } from "@/data/companies";
@@ -35,11 +35,16 @@ import { buildBins, occupancy, WAREHOUSE, WAREHOUSES } from "@/data/warehouses";
 import { useI18n } from "@/i18n/client";
 import { hasDgtLabel } from "@/lib/checks";
 import type { SunPosition, TimePreset } from "@/lib/sun";
+import { useMedia } from "@/lib/use-media";
 import { cn, fill } from "@/lib/utils";
 import { useMarket, type MapLayers } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
 import { Feed } from "@/components/feed";
-import type { MapStatus, Selection } from "./corridor-map";
+import { setCredits, useCreditsOpen } from "./credits";
+import { GLBoundary } from "./gl-boundary";
+import { Schematic } from "./schematic";
+import type { Basemap, MapStatus, Selection } from "./types";
+import { afterPaint, webgl2 } from "./webgl";
 
 const CorridorMap = dynamic(() => import("./corridor-map"), { ssr: false });
 
@@ -56,27 +61,57 @@ const TIMES: { id: TimePreset; icon: typeof Sun }[] = [
 const VIEW_IDS: ViewId[] = ["corridor", "donostia", "pasaia", "border", "biarritz"];
 const VIEW_KEY = { corridor: "viewCorridor", donostia: "viewDonostia", pasaia: "viewPasaia", border: "viewBorder", biarritz: "viewBiarritz" } as const;
 
+/**
+ * The live map screen. MapHost (map-host.tsx) mounts it once, from the app layout,
+ * and keeps it hidden while other screens are shown.
+ */
 export function MapScreen() {
   const { lang, d, f, place } = useI18n();
   const dark = useIsDark();
   const settings = useMarket((s) => s.settings);
   const loads = useMarket((s) => s.loads);
   const returns = useMarket((s) => s.returns);
-  // "Show on map" links here with ?focus=<load id>; useSearchParams already holds the new URL
-  // during a client-side navigation (window.location doesn't yet).
-  const params = useSearchParams();
-  const [linked] = useState(() => {
-    const id = params.get("focus");
-    return id && useMarket.getState().loads.some((l) => l.id === id) ? id : null;
-  });
-  const [selection, setSelection] = useState<Selection>(linked ? { kind: "load", id: linked } : null);
+  const [selection, setSelection] = useState<Selection>(null);
   const [status, setStatus] = useState<MapStatus>("loading");
   const [sun, setSun] = useState<SunPosition | null>(null);
   const [flyTo, setFlyTo] = useState<{ view: ViewId; n: number } | null>(null);
-  const [focus, setFocus] = useState<{ loadId: string; n: number } | null>(linked ? { loadId: linked, n: 1 } : null);
+  const [focus, setFocus] = useState<{ loadId: string; n: number } | null>(null);
   const [sheet, setSheet] = useState<"none" | "settings" | "feed">("none");
   const [panel, setPanel] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
   const [mapKey, setMapKey] = useState(0);
+  // "Show on map" links here with ?focus=<load id>; useSearchParams already holds the new URL
+  // during a client-side navigation (window.location doesn't yet). The screen stays mounted
+  // between visits, so every new link counts, not just the one it was first opened with.
+  const linked = useSearchParams().get("focus");
+  const [handled, setHandled] = useState<string | null>(null);
+  if (linked !== handled) {
+    setHandled(linked);
+    if (linked && useMarket.getState().loads.some((l) => l.id === linked)) {
+      setSelection({ kind: "load", id: linked });
+      setFocus((p) => ({ loadId: linked, n: (p?.n ?? 0) + 1 }));
+    }
+  }
+  // The side panels exist from md up; phones get the same content in sheets.
+  const desktop = useMedia("(min-width: 768px)");
+  // MapLibre's chunk is fetched (and WebGL2 probed) after this screen has painted, so the KPIs don't wait.
+  // No WebGL2, or a 3D map that crashed: the SVG schematic instead.
+  const [gl, setGl] = useState<boolean | null>(null);
+  const [crashed, setCrashed] = useState(false);
+  useEffect(() => afterPaint(() => setGl(webgl2())), []);
+  const basemap: Basemap = gl === false || crashed || status === "nowebgl" ? "svg" : status === "fallback" ? "schematic" : "vector";
+  // The credits (drawn by the app layout, see credits.tsx) list what is on screen.
+  useEffect(() => setCredits({ basemap }), [basemap]);
+  const creditsOpen = useCreditsOpen();
+  const locale = useMemo(
+    () => ({
+      "Map.Title": d.map.title,
+      "NavigationControl.ZoomIn": d.map.zoomIn,
+      "NavigationControl.ZoomOut": d.map.zoomOut,
+      "NavigationControl.ResetBearing": d.map.resetBearing,
+      "AttributionControl.ToggleAttribution": d.map.credits.toggle,
+    }),
+    [d],
+  );
 
   const kpi = useMemo(() => {
     // What the market has booked: every agreed price on a load that wasn't cancelled.
@@ -129,29 +164,34 @@ export function MapScreen() {
 
   return (
     <div className="absolute inset-x-0 top-0 bottom-[calc(4rem+env(safe-area-inset-bottom))] overflow-hidden bg-sea md:bottom-0">
-      {status === "nowebgl" ? (
-        <div className="grid h-full place-items-center p-6 text-center text-sm text-ink-2">{d.map.noWebgl}</div>
-      ) : (
-        <CorridorMap
-          key={mapKey}
-          dark={dark}
-          lang={lang}
-          settings={settings}
-          flyTo={flyTo}
-          focus={focus}
-          selection={selection}
-          onSelect={select}
-          onStatus={setStatus}
-          onSun={setSun}
-          tooltip={tooltip}
-          onRestart={() => {
-            setStatus("loading");
-            setMapKey((k) => k + 1);
-          }}
-        />
-      )}
+      <h1 className="sr-only">{d.map.title}</h1>
+      {basemap === "svg" ? (
+        <Schematic />
+      ) : gl ? (
+        <GLBoundary fallback={null} onError={() => setCrashed(true)}>
+          <CorridorMap
+            key={mapKey}
+            dark={dark}
+            lang={lang}
+            settings={settings}
+            locale={locale}
+            flyTo={flyTo}
+            focus={focus}
+            selection={selection}
+            onSelect={select}
+            onStatus={setStatus}
+            onSun={setSun}
+            tooltip={tooltip}
+            onInteract={() => setCredits({ interacted: true })}
+            onRestart={() => {
+              setStatus("loading");
+              setMapKey((k) => k + 1);
+            }}
+          />
+        </GLBoundary>
+      ) : null}
 
-      {status === "loading" ? <Spinner label={d.map.loadingMap} className="pointer-events-none absolute inset-0" /> : null}
+      {status === "loading" && gl !== false ? <Spinner label={d.map.loadingMap} className="pointer-events-none absolute inset-0" /> : null}
 
       {/* KPIs, then the settings panel under them: it follows the chips however many rows they wrap to */}
       <div className="pointer-events-none absolute inset-x-0 top-0 bottom-3 flex flex-col items-start p-2 md:bottom-10 md:p-3 md:pr-[22rem] lg:bottom-28 lg:pr-[24rem]">
@@ -166,16 +206,16 @@ export function MapScreen() {
             </div>
           ))}
         </div>
-        {status === "fallback" ? (
-          <div className="pointer-events-auto mt-1.5 inline-flex max-w-[calc(100%-3.5rem)] items-center gap-2 rounded-lg border border-line bg-warn-soft px-2.5 py-1 text-xs font-medium text-warn md:max-w-full">
+        {basemap !== "vector" ? (
+          <div role="status" className="pointer-events-auto mt-1.5 inline-flex max-w-[calc(100%-3.5rem)] items-center gap-2 rounded-lg border border-line bg-warn-soft px-2.5 py-1 text-xs font-medium text-warn md:max-w-full">
             <Layers className="size-3.5 shrink-0" aria-hidden />
-            <span className="truncate">{d.map.fallback}</span>
+            <span className={cn(basemap === "schematic" && "truncate")}>{basemap === "schematic" ? d.map.fallback : crashed ? d.map.crashed : d.map.noWebgl}</span>
           </div>
         ) : null}
 
         {/* Settings (desktop): open on wide screens, a button otherwise */}
         {panel ? (
-          <aside className="glass pointer-events-auto mt-2 hidden min-h-0 w-64 overflow-y-auto rounded-2xl border border-line p-2 shadow-card scrollbar-thin md:block">
+          <aside aria-label={d.map.panel} className="glass pointer-events-auto mt-2 hidden min-h-0 w-64 overflow-y-auto rounded-2xl border border-line p-2 shadow-card scrollbar-thin md:block">
             <button
               type="button"
               onClick={() => setPanel(false)}
@@ -202,16 +242,18 @@ export function MapScreen() {
       </div>
 
       {/* Live feed (desktop) */}
-      <aside className="glass absolute top-3 right-3 hidden max-h-[42%] w-[20rem] flex-col overflow-hidden rounded-2xl border border-line shadow-card md:flex lg:w-[22rem]">
-        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-signal opacity-60" />
-            <span className="relative inline-flex size-2 rounded-full bg-signal" />
-          </span>
-          <span className="text-[0.8rem] font-bold text-ink">{d.map.feed}</span>
-        </div>
-        <Feed onPick={focusLoad} />
-      </aside>
+      {desktop ? (
+        <aside aria-label={d.map.feed} className="glass absolute top-3 right-3 hidden max-h-[42%] w-[20rem] flex-col overflow-hidden rounded-2xl border border-line shadow-card md:flex lg:w-[22rem]">
+          <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+            <span className="relative flex size-2">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-signal opacity-60" />
+              <span className="relative inline-flex size-2 rounded-full bg-signal" />
+            </span>
+            <span className="text-[0.8rem] font-bold text-ink">{d.map.feed}</span>
+          </div>
+          <Feed onPick={focusLoad} />
+        </aside>
+      ) : null}
 
       {/* Legend (desktop) */}
       <div className="glass absolute bottom-3 left-3 hidden rounded-xl border border-line px-3 py-2 shadow-card lg:block">
@@ -234,7 +276,7 @@ export function MapScreen() {
         <div className="absolute inset-x-2 bottom-2 z-10 md:inset-x-auto md:right-14 md:bottom-10 md:w-[23rem]">
           <SelectionCard sel={selection} onClose={() => setSelection(null)} onFocus={focusLoad} />
         </div>
-      ) : (
+      ) : creditsOpen || basemap === "svg" ? null : (
         <p className="pointer-events-none absolute bottom-3 left-3 hidden max-w-[calc(100%-8rem)] rounded-full bg-black/60 px-3 py-1 text-[0.7rem] text-white backdrop-blur md:block lg:hidden">
           {d.map.hint}
         </p>

@@ -4,20 +4,22 @@ import { ArrowRight, Gavel, MapPin, Repeat, Search, Truck, X } from "lucide-reac
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
+import { screenIntro } from "@/components/app/intro";
 import { Page, PageHeader } from "@/components/app/shell";
 import { Feed } from "@/components/feed";
-import { ChecksList, EcmrTimeline, LoadCard } from "@/components/load-bits";
+import { blockReason, ChecksList, DemoNote, EcmrTimeline, FictionalTag, labelText, LoadCard, RuleChip, useDeadlines, useRuleCtx } from "@/components/load-bits";
 import { RouteMini } from "@/components/route-mini";
 import { Button, Card, Chip, EcoBadge, Empty, Field, inputClass, SectionTitle, Segmented, Sheet, StatusChip } from "@/components/ui";
 import { CARRIER, DRIVER, ME, SHIPPER, VEHICLE, VEHICLES } from "@/data/companies";
-import { CARRIES, fitsReturn } from "@/data/seed";
+import { CARRIES, eligibleCarriers, fitsReturn } from "@/data/seed";
 import type { Bid, Load, ReturnTrip, VehicleType } from "@/data/types";
 import { useI18n } from "@/i18n/client";
-import { CABOTAGE_LIMIT, cabotageUsed, hasDgtLabel, isCabotage } from "@/lib/checks";
+import { runVerdict } from "@/lib/cabotage";
+import { hasDgtLabel } from "@/lib/checks";
 import { fromMadridInput, toMadridInput } from "@/lib/format";
 import { quote } from "@/lib/pricing";
 import { useMedia } from "@/lib/use-media";
-import { cn, fill } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { useMarket } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
 
@@ -128,7 +130,8 @@ export function LoadBoard() {
 
   return (
     <Page>
-      <PageHeader title={d.loads.title} lead={n(d.loads.lead, counts.open)} />
+      {/* The shell shows the title while the market starts (intro.ts); the lead counts the open loads. */}
+      <PageHeader title={screenIntro("loads", d, place).title} lead={n(d.loads.lead, counts.open)} />
       <div className="mt-4 flex flex-col gap-2.5">
         <Segmented value={tab} onChange={setTab} options={tabs} label={d.loads.title} className="self-start" />
         <div className="flex flex-wrap items-center gap-2">
@@ -199,6 +202,8 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
   const bookOnReturn = useMarket((s) => s.bookOnReturn);
   const cancelLoad = useMarket((s) => s.cancelLoad);
   const now = useSimNow();
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
 
   if (!l) return <Empty className="m-4">{d.loads.empty}</Empty>;
   const qt = quote({ from: l.from, to: l.to, vehicle: l.vehicle, express: l.express, tailLift: l.tailLift, adr: l.adr }, !!(l.vehicleId && VEHICLE.get(l.vehicleId)?.electric));
@@ -215,6 +220,8 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
       })
     : [];
   const price = l.price ?? l.target;
+  // Someone must be able to run it legally before the instant price can be booked.
+  const bookable = !open || eligibleCarriers(l, { ...rules, at: l.pickupAt }).length > 0;
 
   return (
     <div className="space-y-5 p-4">
@@ -231,7 +238,10 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
           <h2 className="mt-1.5 text-lg leading-tight font-extrabold text-ink">
             {place(l.from)} → {place(l.to)}
           </h2>
-          <p className="mt-0.5 text-sm text-ink-3">{SHIPPER.get(l.shipperId)?.name}</p>
+          <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-sm text-ink-3">
+            {SHIPPER.get(l.shipperId)?.name}
+            <FictionalTag />
+          </p>
         </div>
         {!inSheet ? (
           <button type="button" onClick={onClose} aria-label={d.common.close} className="rounded-lg p-1.5 text-ink-3 transition hover:bg-surface-2 hover:text-ink">
@@ -276,12 +286,13 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
           </div>
           <div className="text-right text-xs text-ink-3">
             <div className="tnum">{d.common.perKm.replace("{{v}}", f.money2(price / Math.max(1, r.km)))}</div>
-            <div className="tnum mt-0.5">{d.loads.fairRange.replace("{{low}}", f.money(qt.low)).replace("{{high}}", f.money(qt.high))}</div>
+            <div className="tnum mt-0.5 whitespace-nowrap">{d.loads.fairRange.replace("{{low}}", f.money(qt.low)).replace("{{high}}", f.money(qt.high))}</div>
           </div>
         </div>
+        <DemoNote className="mt-1 text-[0.7rem]" />
         {open && (role === "shipper" || role === "dispatcher") && (shipperMine || role === "dispatcher") ? (
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant={l.mode === "instant" ? "primary" : "secondary"} onClick={() => bookInstant(l.id)} className="flex-1">
+            <Button variant={l.mode === "instant" ? "primary" : "secondary"} disabled={!bookable} onClick={() => bookInstant(l.id)} className="flex-1">
               {d.loads.bookNow.replace("{{amount}}", f.money(l.target))}
             </Button>
             {shipperMine ? (
@@ -292,6 +303,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
           </div>
         ) : null}
         {open && role === "shipper" && !shipperMine ? <p className="mt-2 text-xs text-ink-3">{d.loads.notYours}</p> : null}
+        {!bookable && (role === "shipper" || role === "dispatcher") ? <p className="mt-2 text-xs font-semibold text-danger">{d.loads.noLegalCarrier}</p> : null}
       </div>
 
       {offers.length && role !== "carrier" ? (
@@ -303,6 +315,9 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
           <ul className="mt-2 space-y-2">
             {offers.map((rt) => {
               const amount = round5(l.target * (1 - rt.discount));
+              const rv = VEHICLE.get(rt.vehicleId);
+              const verdict = rv ? runVerdict(l, rv, rules.loads, rules) : null;
+              const reason = verdict ? blockReason(verdict, d, day) : null;
               return (
                 <li key={rt.id} className="flex flex-wrap items-center gap-2 text-[0.8rem]">
                   <span className="min-w-0 flex-1 text-ink-2">
@@ -310,15 +325,21 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
                       .replace("{{carrier}}", CARRIER.get(rt.carrierId)?.name ?? "")
                       .replace("{{from}}", place(rt.from))
                       .replace("{{to}}", place(rt.to))
-                      .replace("{{t}}", f.rel(rt.departAt, now))}
+                      .replace("{{t}}", f.rel(rt.departAt, now))}{" "}
+                    <FictionalTag className="text-ink-2" />
+                    {reason ? <span className="mt-0.5 block font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</span> : null}
                   </span>
-                  {(role === "shipper" && shipperMine) || role === "dispatcher" ? (
-                    <Button size="sm" variant="lime" onClick={() => bookOnReturn(l.id, rt.id)}>
-                      {d.loads.bookReturn.replace("{{amount}}", f.money(amount))}
-                    </Button>
-                  ) : (
-                    <Chip tone="lime">{f.money(amount)}</Chip>
-                  )}
+                  <span className="text-right">
+                    {(role === "shipper" && shipperMine) || role === "dispatcher" ? (
+                      <Button size="sm" variant="lime" disabled={!!reason} onClick={() => bookOnReturn(l.id, rt.id)}>
+                        {d.loads.bookReturn.replace("{{amount}}", f.money(amount))}
+                      </Button>
+                    ) : (
+                      <Chip tone="lime">{f.money(amount)}</Chip>
+                    )}
+                    {/* ink-2: ink-3 is below 4.5:1 on the lime panel in dark mode. */}
+                    <DemoNote short className="mt-0.5 text-ink-2" />
+                  </span>
                 </li>
               );
             })}
@@ -331,6 +352,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
 
       <div>
         <SectionTitle aside={<span className="text-xs text-ink-3">{bids.length}</span>}>{d.loads.bidsTitle}</SectionTitle>
+        {bids.length ? <p className="mt-1 text-[0.72rem] text-ink-3">{d.loads.bidsDemo}</p> : null}
         {bids.length ? (
           <ul className="mt-2 space-y-2">
             {bids.map((b) => (
@@ -359,6 +381,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
           <span className="min-w-0 truncate text-ink-3">
             {DRIVER.get(v.driverId)?.name} · {CARRIER.get(v.carrierId)?.name}
           </span>
+          <FictionalTag />
         </div>
       ) : null}
 
@@ -405,14 +428,13 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function BidRow({ bid, load, canAccept, onAccept }: { bid: Bid; load: Load; canAccept: boolean; onAccept: () => void }) {
   const { d, f } = useI18n();
-  const loads = useMarket((s) => s.loads);
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
   const c = CARRIER.get(bid.carrierId);
   const v = VEHICLE.get(bid.vehicleId);
-  const cab = isCabotage(load, bid.carrierId);
-  const used = cab ? cabotageUsed(bid.carrierId, loads) : 0;
-  // Once this carrier holds the load, it is already one of the `used` operations.
-  const held = load.carrierId === bid.carrierId && load.status !== "open" && load.status !== "cancelled";
-  const full = held ? used > CABOTAGE_LIMIT : used >= CABOTAGE_LIMIT;
+  // The rules apply to the vehicle in the bid, at the pickup it offers.
+  const verdict = v && bid.status === "pending" ? runVerdict({ ...load, pickupAt: bid.pickupEta }, v, rules.loads, rules) : null;
+  const reason = verdict ? blockReason(verdict, d, day) : null;
   return (
     <li
       className={cn(
@@ -428,8 +450,9 @@ function BidRow({ bid, load, canAccept, onAccept }: { bid: Bid; load: Load; canA
             <span className="text-[0.7rem] font-semibold text-ink-3">
               {c?.country} · {c ? f.num(c.rating, 1) : ""} ★
             </span>
+            <FictionalTag />
             {bid.mine ? <Chip tone="accent">{d.loads.yourBid}</Chip> : null}
-            {cab ? <Chip tone={full ? "danger" : "warn"}>{fill(d.checks.cabotageChip, { used, limit: CABOTAGE_LIMIT })}</Chip> : null}
+            {verdict ? <RuleChip verdict={verdict} /> : null}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-ink-3">
             {v ? (
@@ -442,15 +465,17 @@ function BidRow({ bid, load, canAccept, onAccept }: { bid: Bid; load: Load; canA
             <span>· {d.loads.pickupEta} {f.time(bid.pickupEta)}</span>
           </div>
           {bid.note ? <p className="mt-1 text-[0.75rem] text-ink-2 italic">“{bid.note}”</p> : null}
+          {reason ? <p className="mt-1 text-[0.72rem] font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</p> : null}
         </div>
         <div className="shrink-0 text-right">
           <div className="tnum text-base font-extrabold text-ink">{f.money(bid.amount)}</div>
+          <DemoNote short />
           {bid.status === "accepted" ? (
             <Chip tone="green">{d.loads.accepted}</Chip>
           ) : bid.status === "rejected" ? (
             <Chip>{d.loads.declined}</Chip>
           ) : canAccept ? (
-            <Button size="sm" variant="primary" onClick={onAccept} className="mt-1">
+            <Button size="sm" variant="primary" disabled={!!reason} onClick={onAccept} className="mt-1">
               {d.loads.accept}
             </Button>
           ) : null}
@@ -466,14 +491,21 @@ function BidForm({ load }: { load: Load }) {
   const loads = useMarket((s) => s.loads);
   const placeBid = useMarket((s) => s.placeBid);
   const bookInstant = useMarket((s) => s.bookInstant);
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
   const busy = new Set(loads.filter((l) => (l.status === "assigned" || l.status === "inTransit") && l.vehicleId).map((l) => l.vehicleId));
   const fleet = VEHICLES.filter((v) => v.carrierId === ME.carrierId && CARRIES[v.type].includes(load.vehicle));
+  // Licence, tachograph and cabotage, vehicle by vehicle: a blocked vehicle can't be bid.
+  const blocked = new Map(fleet.map((v) => [v.id, blockReason(runVerdict(load, v, rules.loads, rules), d, day)]));
+  const allowed = (id: string) => !blocked.get(id);
   const existing = bids.find((b) => b.loadId === load.id && b.mine && b.status === "pending");
   const qt = quote({ from: load.from, to: load.to, vehicle: load.vehicle, express: load.express, tailLift: load.tailLift, adr: load.adr });
   const [amount, setAmount] = useState(existing?.amount ?? round5(load.target * 0.95));
-  const [vehicleId, setVehicleId] = useState(existing?.vehicleId ?? (fleet.find((v) => !busy.has(v.id)) ?? fleet[0])?.id ?? "");
+  const [vehicleId, setVehicleId] = useState(existing?.vehicleId ?? (fleet.find((v) => !busy.has(v.id) && allowed(v.id)) ?? fleet.find((v) => allowed(v.id)) ?? fleet[0])?.id ?? "");
   const [eta, setEta] = useState(toMadridInput(existing?.pickupEta ?? load.pickupAt));
   const [note, setNote] = useState(existing?.note ?? "");
+  const reason = vehicleId ? blocked.get(vehicleId) : null;
+  const anyAllowed = fleet.some((v) => allowed(v.id));
 
   if (!fleet.length)
     return (
@@ -488,7 +520,7 @@ function BidForm({ load }: { load: Load }) {
       className="space-y-3 rounded-2xl border border-accent/40 bg-accent-soft/40 p-3.5"
       onSubmit={(e) => {
         e.preventDefault();
-        if (amount > 0 && vehicleId) placeBid(load.id, amount, vehicleId, fromMadridInput(eta), note.trim() || undefined);
+        if (amount > 0 && vehicleId && !reason) placeBid(load.id, amount, vehicleId, fromMadridInput(eta), note.trim() || undefined);
       }}
     >
       <div className="flex items-center gap-2 text-sm font-bold text-accent-text">
@@ -508,24 +540,26 @@ function BidForm({ load }: { load: Load }) {
       <Field label={d.loads.yourVehicle}>
         <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className={inputClass}>
           {fleet.map((v) => (
-            <option key={v.id} value={v.id}>
+            <option key={v.id} value={v.id} disabled={!allowed(v.id)}>
               {v.plate} · {d.vehiclesShort[v.type]}
-              {hasDgtLabel(v) ? ` · ${v.eco}` : ""} · {DRIVER.get(v.driverId)?.name}
+              {hasDgtLabel(v) ? ` · ${labelText(v.eco, d)}` : ""} · {DRIVER.get(v.driverId)?.name}
               {busy.has(v.id) ? ` (${d.loads.vehicleBusy})` : ""}
+              {blocked.get(v.id) ? ` (${blocked.get(v.id)})` : ""}
             </option>
           ))}
         </select>
       </Field>
+      {reason ? <p className="-mt-1 text-[0.75rem] font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</p> : null}
       <Field label={d.loads.note}>
         <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={d.loads.notePh} className={inputClass} maxLength={140} />
       </Field>
       <ChecksList load={load} carrierId={ME.carrierId} vehicleId={vehicleId} />
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" variant="primary" className="flex-1">
+        <Button type="submit" variant="primary" disabled={!!reason} className="flex-1">
           {existing ? d.loads.updateBid : d.loads.sendBid}
         </Button>
         {load.mode === "instant" ? (
-          <Button variant="secondary" onClick={() => bookInstant(load.id)}>
+          <Button variant="secondary" disabled={!anyAllowed} onClick={() => bookInstant(load.id)}>
             {d.loads.takeNow.replace("{{amount}}", f.money(load.target))}
           </Button>
         ) : null}
@@ -536,14 +570,24 @@ function BidForm({ load }: { load: Load }) {
 
 function DispatchActions({ load }: { load: Load }) {
   const { d } = useI18n();
+  const rules = useRuleCtx();
+  const { day } = useDeadlines();
   const loads = useMarket((s) => s.loads);
   const assignVehicle = useMarket((s) => s.assignVehicle);
   const advance = useMarket((s) => s.advance);
   const busy = new Set(loads.filter((l) => l.id !== load.id && (l.status === "assigned" || l.status === "inTransit") && l.vehicleId).map((l) => l.vehicleId));
   const fleet = VEHICLES.filter((v) => v.carrierId === load.carrierId && CARRIES[v.type].includes(load.vehicle));
-  // Only a free truck can be picked: if the chosen one gets another job meanwhile, fall back to the first free one.
+  // Only a free truck that may legally run the job can be picked (licence, tachograph, cabotage); if the chosen
+  // one gets another job or becomes blocked meanwhile, fall back to the first usable one.
+  const blocked = new Map(fleet.map((v) => [v.id, blockReason(runVerdict(load, v, rules.loads, rules), d, day)]));
+  const usable = (id: string) => !busy.has(id) && !blocked.get(id);
   const [picked, setPicked] = useState<string | null>(null);
-  const vehicleId = load.vehicleId ?? (picked && !busy.has(picked) ? picked : (fleet.find((v) => !busy.has(v.id))?.id ?? ""));
+  // Booked: the truck you pick, else the one the market planned on it (while it is free and allowed), else the first
+  // usable one. Once assigned, its own truck.
+  const planned = load.vehicleId && usable(load.vehicleId) ? load.vehicleId : undefined;
+  const vehicleId = load.status !== "booked" ? (load.vehicleId ?? "") : ((picked && usable(picked) ? picked : undefined) ?? planned ?? fleet.find((v) => usable(v.id))?.id ?? "");
+  // Nothing usable because of the rules: say why.
+  const reason = load.status === "booked" && !vehicleId ? (fleet.map((v) => blocked.get(v.id)).find(Boolean) ?? null) : null;
   if (load.status === "delivered" || load.status === "cancelled") return null;
   return (
     <div className="space-y-2.5 rounded-2xl border border-warn/40 bg-warn-soft/50 p-3.5">
@@ -561,10 +605,11 @@ function DispatchActions({ load }: { load: Load }) {
               </option>
             )}
             {fleet.map((v) => (
-              <option key={v.id} value={v.id} disabled={busy.has(v.id)}>
+              <option key={v.id} value={v.id} disabled={busy.has(v.id) || !!blocked.get(v.id)}>
                 {v.plate} · {d.vehiclesShort[v.type]}
-                {hasDgtLabel(v) ? ` · ${v.eco}` : ""}
+                {hasDgtLabel(v) ? ` · ${labelText(v.eco, d)}` : ""}
                 {busy.has(v.id) ? ` (${d.loads.vehicleBusy})` : ""}
+                {blocked.get(v.id) ? ` (${blocked.get(v.id)})` : ""}
               </option>
             ))}
           </select>
@@ -573,6 +618,7 @@ function DispatchActions({ load }: { load: Load }) {
           </Button>
         </div>
       ) : null}
+      {reason ? <p className="text-[0.75rem] font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</p> : null}
       {load.status === "assigned" ? (
         <Button variant="primary" onClick={() => advance(load.id)} className="w-full">
           {d.loads.depart}
