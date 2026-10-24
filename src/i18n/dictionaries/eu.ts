@@ -27,7 +27,7 @@ export const eu: Dict = {
     updated: "Eguneratua: {{date}}",
     storedTitle: "Zure nabigatzailean gordetzen dena",
     storedLead: "Zure gailuan geratzen da. Zamak ez du zerbitzariko datu-baserik; beraz, hau guztia ez zaigu iristen.",
-    demoKey: "Tokiko biltegiratzea. Demoan egiten dituzun kargak, eskaintzak, itzulerako bidaiak, kai-hitzorduak eta paleten aldaketak, baita zure rola eta maparen ezarpenak ere.",
+    demoKey: "Tokiko biltegiratzea. Demoan egiten dituzun kargak, eskaintzak, itzulerako bidaiak, kai-hitzorduak eta paleten aldaketak, baita zure rola, maparen ezarpenak eta merkatuaren erlojua ere, berriz kargatzean utzitako lekutik jarraitzeko.",
     themeKey: "Tokiko biltegiratzea. Argia edo iluna, bat aukeratzen baduzu bakarrik; bestela, guneak sistemaren ezarpena jarraitzen du.",
     langKey: "Cookie-a, urtebete. Hizkuntza-hautatzailean aukeratzen duzun hizkuntza, hasierako orria hizkuntza horretan ireki dadin. Hizkuntza bat aukeratzean bakarrik sortzen da eta aukera horretarako beharrezkoa da; beraz, ez du baimenik behar.",
     clear: "Ezabatzeko, erabili “{{reset}}” aplikazioaren ⋯ menuan, edo ezabatu gune honen datuak nabigatzailearen ezarpenetan.",

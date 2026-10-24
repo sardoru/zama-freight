@@ -420,4 +420,4 @@ which at this three-decimal precision would sit within about 50 m of it:
 
 Motorway junctions sit 30 m to 1.25 km off the OSM carriageways. The outline may still have been traced by eye from
 OSM-based maps, so wherever it is drawn it is credited to OpenStreetMap as a precaution: the map's SVG schematic
-(without WebGL) does, and issue #17 adds the same credit to the share card and the landing illustration.
+(without WebGL) does, and so do the share card and the landing illustration.

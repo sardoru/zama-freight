@@ -195,7 +195,8 @@ function ReturnCard({ rt, loads, now, own }: { rt: ReturnTrip; loads: Load[]; no
                   ) : (
                     <span className="tnum font-bold text-ink">{f.money(amount)}</span>
                   )}
-                  <DemoNote short className="mt-0.5" />
+                  {/* ink-2: ink-3 is below 4.5:1 on the lime tile in dark mode. */}
+                  <DemoNote short className="mt-0.5 text-ink-2" />
                 </span>
               </li>
             );

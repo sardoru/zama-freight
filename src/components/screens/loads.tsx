@@ -326,7 +326,7 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
                       .replace("{{from}}", place(rt.from))
                       .replace("{{to}}", place(rt.to))
                       .replace("{{t}}", f.rel(rt.departAt, now))}{" "}
-                    <FictionalTag />
+                    <FictionalTag className="text-ink-2" />
                     {reason ? <span className="mt-0.5 block font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</span> : null}
                   </span>
                   <span className="text-right">
@@ -337,7 +337,8 @@ export function LoadDetail({ id, onClose, inSheet }: { id: string; onClose: () =
                     ) : (
                       <Chip tone="lime">{f.money(amount)}</Chip>
                     )}
-                    <DemoNote short className="mt-0.5" />
+                    {/* ink-2: ink-3 is below 4.5:1 on the lime panel in dark mode. */}
+                    <DemoNote short className="mt-0.5 text-ink-2" />
                   </span>
                 </li>
               );

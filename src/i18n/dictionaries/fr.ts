@@ -27,7 +27,7 @@ export const fr: Dict = {
     updated: "Mis à jour le {{date}}",
     storedTitle: "Conservé dans votre navigateur",
     storedLead: "Ces données restent sur votre appareil. Zama n'a pas de base de données côté serveur : rien de tout cela ne nous parvient.",
-    demoKey: "Stockage local. Les frets, offres, retours à vide, rendez-vous de quai et modifications de palettes que vous faites dans la démo, ainsi que votre rôle et les réglages de la carte.",
+    demoKey: "Stockage local. Les frets, offres, retours à vide, rendez-vous de quai et modifications de palettes que vous faites dans la démo, ainsi que votre rôle, les réglages de la carte et l'horloge du marché, pour reprendre là où vous en étiez après un rechargement.",
     themeKey: "Stockage local. Clair ou sombre, seulement si vous en choisissez un ; sinon le site suit le réglage de votre système.",
     langKey: "Cookie, un an. La langue choisie dans le sélecteur de langue, pour que la page d'accueil s'ouvre dans cette langue. Il n'est déposé que lorsque vous choisissez une langue et il est nécessaire à ce choix : il ne demande donc pas de consentement.",
     clear: "Pour les supprimer, utilisez « {{reset}} » dans le menu ⋯ de l'application, ou effacez les données de ce site dans les réglages de votre navigateur.",

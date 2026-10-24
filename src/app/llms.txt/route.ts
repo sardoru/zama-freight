@@ -1,16 +1,22 @@
 // /llms.txt (https://llmstxt.org): a plain-text briefing for language models and
 // other machine readers, so nobody summarises the demo as a live market (issue #3).
-// The rule facts match the corrected rules of issues #2, #4 and #9.
+// The rule facts are the ones the app checks (issues #2, #4, #9, #10): dates and
+// limits come from the same constants as lib/checks.ts and lib/cabotage.ts.
 import { CARRIERS } from "@/data/companies";
 import { PLACE_IDS } from "@/data/places";
 import { LOCALE_NAMES, LOCALES } from "@/i18n/config";
 import { getDict } from "@/i18n/get-dict";
+import { CABOTAGE_LIMIT, CABOTAGE_WINDOW_DAYS, COOLING_OFF_DAYS } from "@/lib/cabotage";
+import { COMMUNITY_LICENCE_ABOVE_KG, DECA_MANDATORY, LIGHT_VAN_TACHOGRAPH_FROM, ZBE_PHASE2 } from "@/lib/checks";
 import { docHref, REPO_URL } from "@/lib/doc-routes";
+import { TZ } from "@/lib/format";
 import { SITE_URL } from "@/lib/site";
 
 export const dynamic = "force-static";
 
 const LANGUAGE = { es: "Spanish", eu: "Basque", fr: "French", en: "English", ru: "Russian" } as const;
+
+const day = (t: number) => new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: TZ }).format(t);
 
 export function GET() {
   const url = (path: string) => `${SITE_URL}${path}`;
@@ -19,7 +25,7 @@ export function GET() {
 
 > Zama is a non-commercial prototype of a freight and warehouse marketplace for the Basque cross-border corridor: San Sebastián / Donostia, the port of Pasaia, Irun, Hendaye and Biarritz–Anglet–Bayonne. It is a simulation. Every company, person, vehicle, plate, price, bid and route in it is invented or approximate. Zama offers no services, takes no bookings or payments, and is not a transport operator, freight forwarder or warehouse keeper.
 
-The whole market runs in the visitor's browser. There is no backend: what a visitor does is saved in their browser's local storage only. The live map loads tiles from OpenFreeMap and terrain tiles from AWS.
+The whole market runs in the visitor's browser. There is no backend: what a visitor does is saved in their browser's local storage only. The live map loads tiles from OpenFreeMap (tiles.openfreemap.org) and terrain tiles from AWS (the elevation-tiles-prod bucket, us-east-1).
 
 ## The four roles
 
@@ -30,12 +36,13 @@ The whole market runs in the visitor's browser. There is no backend: what a visi
 
 ## Rules the demo checks (simplified; not legal advice)
 
-- Donostia / San Sebastián low-emission zone (ZBE): vehicles with the DGT 0, ECO, C and B labels may enter; vehicles without a label are banned (regular deliveries can apply for an authorisation). B-label vehicles lose access from phase 2, which the city expects in 2028.
+- Donostia / San Sebastián low-emission zone (ZBE Donostia Centro: the Parte Vieja, Centro and part of Amara; Gros and Egia are outside). Vehicles with the DGT 0, ECO and C labels may enter. B-label vehicles may enter until ${day(ZBE_PHASE2 - 1)} and are banned from phase 2, which starts on ${day(ZBE_PHASE2)} under the ordinance (the city's website says 2028). Vehicles without a label are banned, except regular delivery vehicles with an authorisation, which lasts until phase 2. Foreign-plated vehicles have no DGT label and need the city's authorisation before they enter.
+- Licences: international jobs and cabotage need a Community licence for vehicles over ${COMMUNITY_LICENCE_ABOVE_KG / 1000} t, and light vans (${COMMUNITY_LICENCE_ABOVE_KG / 1000}–3.5 t) on them need a tachograph from ${day(LIGHT_VAN_TACHOGRAPH_FROM)}.
 - Transport documents depend on where the trip runs:
-  - Inside Spain: the electronic control document DeCA is mandatory for domestic road freight from 5 October 2026.
-  - Between Spain and France: a CMR consignment note, on paper or as an e-CMR. The e-CMR is optional; Spain and France both accept it.
-  - Inside France: a lettre de voiture.
-- EU cabotage (Regulation (EC) No 1072/2009 as amended by the Mobility Package): counted per vehicle. After an international delivery, a vehicle may make at most 3 cabotage operations within 7 days in the host country, then must wait a 4-day cooling-off period before doing cabotage in that country again.
+  - Inside Spain: the control document DeCA, issued by the contracting shipper and the carrier, electronic and mandatory from ${day(DECA_MANDATORY)}, cabotage included. Transport that needs no licence, house removals and parcels are exempt.
+  - Between Spain and France: a CMR consignment note made out by the sender, on paper, or as an e-CMR by agreement: only if both parties agree. Spain and France both ratified the e-CMR protocol; neither requires it.
+  - Inside France: a lettre de voiture, drawn up by the carrier; on a cabotage leg it also shows the vehicle's plate and the unloading date.
+- EU cabotage (Regulation (EC) No 1072/2009 as amended by Regulation (EU) 2020/1055), counted per vehicle and per host country: after unloading an incoming international carriage in a country, a vehicle may make at most ${CABOTAGE_LIMIT} cabotage operations there, the last one unloaded by the end of the ${CABOTAGE_WINDOW_DAYS}th day after that unloading. Once it has left that country, a ${COOLING_OFF_DAYS}-day cooling-off applies there to that vehicle. Drivers on cabotage and cross-trade jobs count as posted and need a posting declaration.
 
 ## Prices and numbers
 

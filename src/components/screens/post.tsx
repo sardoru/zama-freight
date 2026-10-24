@@ -383,7 +383,7 @@ export function PostLoad() {
                       <div className="flex items-center justify-between gap-2">
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className="truncate text-sm font-bold text-ink">{CARRIER.get(rt.carrierId)?.name}</span>
-                          <FictionalTag />
+                          <FictionalTag className="text-ink-2" />
                         </span>
                         <Chip tone="lime">{d.map.discount.replace("{{pct}}", String(Math.round(rt.discount * 100)))}</Chip>
                       </div>
@@ -394,7 +394,8 @@ export function PostLoad() {
                         {d.post.bookReturn.replace("{{amount}}", f.money(amount))}
                       </Button>
                       {reason ? <p className="mt-1 text-[0.72rem] font-semibold text-danger">{d.loads.blocked.replace("{{reason}}", reason)}</p> : null}
-                      <DemoNote short className="mt-1 text-center" />
+                      {/* ink-2: ink-3 is below 4.5:1 on the lime tile in dark mode. */}
+                      <DemoNote short className="mt-1 text-center text-ink-2" />
                     </li>
                   );
                 })}

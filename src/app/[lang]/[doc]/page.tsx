@@ -186,6 +186,8 @@ function Legal({ d }: { d: Dict }) {
       </Section>
       <Section title={l.creditsTitle}>
         <p>{l.credits}</p>
+        {/* The sources inside the terrain tiles, credited as on the map (issue #17). */}
+        <p>{[d.map.credits.eudem, d.map.credits.usgs, d.map.credits.noaa].join(". ")}.</p>
       </Section>
     </>
   );

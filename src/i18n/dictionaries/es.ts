@@ -27,7 +27,7 @@ export const es: Dict = {
     updated: "Actualizado el {{date}}",
     storedTitle: "Lo que se guarda en tu navegador",
     storedLead: "Se queda en tu dispositivo. Zama no tiene base de datos en servidor, así que nada de esto nos llega.",
-    demoKey: "Almacenamiento local. Las cargas, ofertas, retornos, citas de muelle y cambios de palés que hagas en la demo, además de tu perfil y los ajustes del mapa.",
+    demoKey: "Almacenamiento local. Las cargas, ofertas, retornos, citas de muelle y cambios de palés que hagas en la demo, además de tu perfil, los ajustes del mapa y el reloj del mercado, para que al recargar sigas donde lo dejaste.",
     themeKey: "Almacenamiento local. Claro u oscuro, solo si eliges uno; si no, el sitio sigue la configuración de tu sistema.",
     langKey: "Cookie, un año. El idioma que eliges en el selector de idioma, para que la página de inicio se abra en él. Solo se crea cuando eliges un idioma y es necesaria para esa elección, por lo que no requiere consentimiento.",
     clear: "Para borrarlos, usa «{{reset}}» en el menú ⋯ de la aplicación o borra los datos de este sitio en los ajustes de tu navegador.",

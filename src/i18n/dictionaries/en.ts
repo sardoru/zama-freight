@@ -28,7 +28,7 @@ export const en = {
     updated: "Updated {{date}}",
     storedTitle: "Kept in your browser",
     storedLead: "These stay on your device. Zama has no server-side database, so none of it reaches us.",
-    demoKey: "Local storage. The loads, bids, return trips, dock bookings and pallet changes you make in the demo, plus your role and map settings.",
+    demoKey: "Local storage. The loads, bids, return trips, dock bookings and pallet changes you make in the demo, plus your role, your map settings and the market clock, so a reload carries on where you left off.",
     themeKey: "Local storage. Light or dark, only if you choose one; otherwise the site follows your system setting.",
     langKey: "Cookie, one year. The language you pick in the language switcher, so the start page opens in it. It is only set when you pick a language and is needed for that choice, so it requires no consent.",
     clear: "To remove them, use “{{reset}}” in the app's ⋯ menu, or clear this site's data in your browser settings.",
