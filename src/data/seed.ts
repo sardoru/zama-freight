@@ -1,0 +1,270 @@
+// The demo day, built relative to the moment the demo opens (t0), so trucks
+// are already on the road and pickups are always "in a few hours".
+import { haversine } from "@/lib/geo";
+import { quote, VEHICLE_SPECS } from "@/lib/pricing";
+import { hash, rng } from "@/lib/random";
+import { CARRIERS, ME, VEHICLES } from "./companies";
+import { route } from "./network";
+import { PLACES, type PlaceId } from "./places";
+import { WAREHOUSES } from "./warehouses";
+import type { Bid, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, VehicleType } from "./types";
+
+export const MIN = 60_000;
+export const HOUR = 60 * MIN;
+
+interface Spec {
+  id: string;
+  shipper: string;
+  from: PlaceId;
+  to: PlaceId;
+  goods: GoodsType;
+  vehicle: VehicleType;
+  pallets: number;
+  kg: number;
+  status: LoadStatus;
+  carrier?: string;
+  veh?: string;
+  /** open/booked/assigned: pickup in minutes from now · inTransit: progress 0–1 · delivered: minutes ago. */
+  at: number;
+  express?: boolean;
+  tailLift?: boolean;
+}
+
+const S = (
+  id: string,
+  shipper: string,
+  from: PlaceId,
+  to: PlaceId,
+  goods: GoodsType,
+  vehicle: VehicleType,
+  pallets: number,
+  kg: number,
+  status: LoadStatus,
+  at: number,
+  carrier?: string,
+  veh?: string,
+  extra: Partial<Spec> = {},
+): Spec => ({ id, shipper, from, to, goods, vehicle, pallets, kg, status, at, carrier, veh, ...extra });
+
+const SPECS: Spec[] = [
+  S("ZM-4101", "s-burdin", "pasaia", "bayonnePort", "steel", "flatbed", 10, 22_000, "inTransit", 0.35, "c-aiako", "v-ai2"),
+  S("ZM-4102", "s-itsaso", "lezo", "biarritz", "chilled", "reefer", 18, 9_000, "open", 180),
+  S("ZM-4103", "s-mobel", "oiartzun", "bayonne", "furniture", "artic", 26, 8_000, "inTransit", 0.55, "c-adour", "v-ad1"),
+  S("ZM-4104", "s-horeca", "zaisa", "donostia", "food", "van", 3, 900, "inTransit", 0.4, "c-urumea", "v-ur1"),
+  S("ZM-4105", "s-agri", "bayonnePort", "astigarraga", "agri", "artic", 24, 23_000, "assigned", 50, "c-adour", "v-ad2"),
+  S("ZM-4106", "s-paper", "hernani", "zaisa", "paper", "artic", 22, 21_000, "open", 240),
+  S("ZM-4107", "s-sagardoa", "astigarraga", "biarritz", "beverages", "rigid", 10, 6_500, "open", 360),
+  S("ZM-4108", "s-surf", "anglet", "donostia", "surf", "van", 2, 300, "open", 120, undefined, undefined, { express: true }),
+  S("ZM-4109", "s-pharma", "hondarribia", "bayonne", "pharma", "reefer", 6, 1_800, "booked", 150, "c-kantauri"),
+  S("ZM-4110", "s-burdin", "pasaia", "oiartzun", "steel", "flatbed", 8, 24_000, "delivered", 90, "c-aiako", "v-ai1"),
+  S("ZM-4111", "s-horeca", "belartza", "irun", "food", "rigid", 8, 3_500, "inTransit", 0.7, "c-urumea", "v-ur4", { tailLift: true }),
+  S("ZM-4112", "s-mobel", "zaisa", "bayonne", "furniture", "artic", 30, 12_000, "inTransit", 0.2, "c-baltic", "v-br1"),
+  S("ZM-4113", "s-itsaso", "lezo", "zaisa", "frozen", "reefer", 20, 14_000, "inTransit", 0.5, "c-kantauri", "v-kf1"),
+  S("ZM-4114", "s-surf", "biarritz", "belartza", "surf", "van", 3, 700, "open", 300),
+  S("ZM-4115", "s-agri", "bayonne", "pasaia", "agri", "artic", 26, 24_000, "open", 330),
+  S("ZM-4116", "s-mobel", "irun", "sjdl", "furniture", "rigid", 12, 4_200, "assigned", 90, "c-labourd", "v-lb3"),
+  S("ZM-4117", "s-horeca", "oiartzun", "donostia", "beverages", "rigid", 9, 5_000, "open", 210),
+  S("ZM-4118", "s-itsaso", "pasaia", "lezo", "food", "artic", 22, 16_000, "booked", 180, "c-aiako"),
+  S("ZM-4119", "s-surf", "donostia", "bayonne", "surf", "van", 4, 1_100, "delivered", 180, "c-labourd", "v-lb1"),
+  S("ZM-4120", "s-mobel", "hendaye", "oiartzun", "furniture", "artic", 28, 9_000, "assigned", 120, "c-txingudi", "v-tx1"),
+  S("ZM-4121", "s-agri", "bayonnePort", "zaisa", "agri", "artic", 26, 23_500, "inTransit", 0.65, "c-baltic", "v-br2"),
+  S("ZM-4122", "s-paper", "errenteria", "anglet", "paper", "rigid", 10, 6_000, "open", 270),
+  S("ZM-4123", "s-parts", "lasarte", "zaisa", "parts", "rigid", 12, 5_200, "booked", 120, "c-txingudi"),
+  S("ZM-4124", "s-sagardoa", "astigarraga", "donostia", "beverages", "van", 3, 1_400, "delivered", 60, "c-urumea", "v-ur2"),
+  S("ZM-4125", "s-pharma", "hondarribia", "lezo", "pharma", "reefer", 8, 2_400, "assigned", 210, "c-txingudi", "v-tx4"),
+  S("ZM-4126", "s-parts", "zaisa", "hernani", "parts", "artic", 20, 9_000, "open", 420),
+  S("ZM-4127", "s-itsaso", "sjdl", "lezo", "frozen", "reefer", 12, 7_000, "open", 240),
+  S("ZM-4128", "s-mobel", "irun", "bayonne", "furniture", "artic", 24, 8_500, "open", 150),
+  S("ZM-4129", "s-horeca", "belartza", "donostia", "food", "van", 2, 600, "inTransit", 0.3, "c-urumea", "v-ur3"),
+  S("ZM-4130", "s-paper", "hernani", "pasaia", "paper", "artic", 20, 20_000, "inTransit", 0.15, "c-aiako", "v-ai3"),
+];
+
+const ECMR: Record<LoadStatus, EcmrState> = { open: "none", booked: "draft", assigned: "shipper", inTransit: "carrier", delivered: "delivered", cancelled: "none" };
+
+/** Which load types a vehicle can carry. */
+export const CARRIES: Record<VehicleType, VehicleType[]> = {
+  van: ["van"],
+  rigid: ["van", "rigid"],
+  artic: ["van", "rigid", "artic"],
+  reefer: ["van", "rigid", "artic", "reefer"],
+  flatbed: ["flatbed"],
+};
+
+export const driveMs = (l: Pick<Load, "from" | "to">) => route(l.from, l.to).minutes * MIN;
+
+export function buildLoads(t0: number): Load[] {
+  return SPECS.map((s) => {
+    const q = quote({ from: s.from, to: s.to, vehicle: s.vehicle, express: s.express, tailLift: s.tailLift });
+    const r = rng(hash(s.id));
+    const dur = q.route.minutes * MIN;
+    let pickupAt = t0 + s.at * MIN;
+    let departedAt: number | undefined;
+    let deliveredAt: number | undefined;
+    if (s.status === "inTransit") {
+      departedAt = t0 - s.at * dur;
+      pickupAt = departedAt - 25 * MIN;
+    } else if (s.status === "delivered") {
+      deliveredAt = t0 - s.at * MIN;
+      departedAt = deliveredAt - dur;
+      pickupAt = departedAt - 25 * MIN;
+    }
+    const booked = s.status !== "open";
+    return {
+      id: s.id,
+      shipperId: s.shipper,
+      from: s.from,
+      to: s.to,
+      goods: s.goods,
+      pallets: s.pallets,
+      kg: s.kg,
+      vehicle: s.vehicle,
+      pickupAt,
+      deliverBy: pickupAt + dur + 3 * HOUR,
+      mode: r.chance(0.3) ? "instant" : "bids",
+      target: q.fair,
+      status: s.status,
+      carrierId: s.carrier,
+      vehicleId: s.veh,
+      price: booked ? Math.round((q.fair * (0.9 + r.next() * 0.14)) / 5) * 5 : undefined,
+      express: s.express,
+      tailLift: s.tailLift,
+      ecmr: ECMR[s.status],
+      departedAt,
+      deliveredAt,
+      createdAt: pickupAt - (6 + r.int(1, 30)) * HOUR,
+      mine: s.shipper === ME.shipperId || undefined,
+    } satisfies Load;
+  });
+}
+
+/** Carriers that can serve a load type (have at least one vehicle for it). */
+export function eligibleCarriers(vehicle: VehicleType) {
+  return CARRIERS.filter((c) => VEHICLES.some((v) => v.carrierId === c.id && CARRIES[v.type].includes(vehicle)));
+}
+
+export function vehicleFor(carrierId: string, type: VehicleType) {
+  return VEHICLES.find((v) => v.carrierId === carrierId && CARRIES[v.type].includes(type));
+}
+
+let bidSeq = 0;
+export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(bidSeq++).toString(36)}`;
+
+export function buildBids(loads: Load[], t0: number): Bid[] {
+  const bids: Bid[] = [];
+  for (const l of loads) {
+    if (l.status === "cancelled") continue;
+    const r = rng(hash(`bids:${l.id}`));
+    const pool = eligibleCarriers(l.vehicle).filter((c) => c.id !== ME.carrierId || l.status !== "open");
+    const n = l.status === "open" ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
+    const chosen = new Set<string>();
+    if (l.carrierId) chosen.add(l.carrierId);
+    while (chosen.size < Math.min(pool.length, n + (l.carrierId ? 1 : 0))) chosen.add(r.pick(pool).id);
+    for (const cid of chosen) {
+      const v = vehicleFor(cid, l.vehicle);
+      if (!v) continue;
+      const accepted = cid === l.carrierId;
+      bids.push({
+        id: `b-${l.id}-${cid}`,
+        loadId: l.id,
+        carrierId: cid,
+        vehicleId: v.id,
+        amount: accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5,
+        pickupEta: l.pickupAt + r.int(-45, 75) * MIN,
+        at: Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR),
+        status: l.status === "open" ? "pending" : accepted ? "accepted" : "rejected",
+      });
+    }
+  }
+  return bids;
+}
+
+export function buildReturns(t0: number): ReturnTrip[] {
+  return [
+    { id: "rt-1", carrierId: "c-adour", vehicleId: "v-ad3", from: "pasaia", to: "bayonnePort", departAt: t0 + 4 * HOUR, freePallets: 14, discount: 0.3, status: "open" },
+    { id: "rt-2", carrierId: "c-kantauri", vehicleId: "v-kf2", from: "biarritz", to: "lezo", departAt: t0 + 3.5 * HOUR, freePallets: 33, discount: 0.28, status: "open" },
+    { id: "rt-3", carrierId: "c-baltic", vehicleId: "v-br3", from: "zaisa", to: "bayonnePort", departAt: t0 + 2 * HOUR, freePallets: 33, discount: 0.33, status: "open" },
+    { id: "rt-4", carrierId: ME.carrierId, vehicleId: "v-tx2", from: "bayonne", to: "irun", departAt: t0 + 5 * HOUR, freePallets: 33, discount: 0.32, status: "open", mine: true },
+    { id: "rt-5", carrierId: "c-labourd", vehicleId: "v-lb2", from: "donostia", to: "anglet", departAt: t0 + 6 * HOUR, freePallets: 4, discount: 0.25, status: "open" },
+  ];
+}
+
+/** Does an open load fit on a return trip? Same direction, close ends, right vehicle, ±6 h. */
+export function fitsReturn(l: Load, rt: ReturnTrip, vehicleType: VehicleType): boolean {
+  if (l.status !== "open" || rt.status !== "open") return false;
+  if (!CARRIES[vehicleType].includes(l.vehicle)) return false;
+  if (l.pallets > Math.min(rt.freePallets, VEHICLE_SPECS[vehicleType].pallets)) return false;
+  const nearFrom = haversine(PLACES[l.from].lnglat, PLACES[rt.from].lnglat) <= 15_000;
+  const nearTo = haversine(PLACES[l.to].lnglat, PLACES[rt.to].lnglat) <= 18_000;
+  return nearFrom && nearTo && Math.abs(l.pickupAt - rt.departAt) <= 6 * HOUR;
+}
+
+export function buildDocks(loads: Load[], t0: number): DockAppt[] {
+  const appts: DockAppt[] = [];
+  for (const w of WAREHOUSES) {
+    const r = rng(hash(`docks:${w.id}`));
+    const busy: number[][] = Array.from({ length: w.doors }, () => []);
+    const place = (start: number, len: number) => {
+      for (let d = 0; d < w.doors; d++) {
+        const door = (d + r.int(0, w.doors - 1)) % w.doors;
+        if (busy[door].every((s) => Math.abs(s - start) > len + 15 * MIN)) {
+          busy[door].push(start);
+          return door;
+        }
+      }
+      return r.int(0, w.doors - 1);
+    };
+    for (const l of loads) {
+      if (l.status === "cancelled") continue;
+      const dur = driveMs(l);
+      if (l.from === w.place) {
+        const start = l.pickupAt - 30 * MIN;
+        appts.push({ id: `dk-${w.id}-${l.id}-o`, warehouseId: w.id, door: place(start, 45 * MIN), start, end: start + 45 * MIN, direction: "out", carrierId: l.carrierId ?? "c-txingudi", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+      }
+      if (l.to === w.place) {
+        const eta = (l.departedAt ?? l.pickupAt) + dur;
+        appts.push({ id: `dk-${w.id}-${l.id}-i`, warehouseId: w.id, door: place(eta, 50 * MIN), start: eta, end: eta + 50 * MIN, direction: "in", carrierId: l.carrierId ?? "c-baltic", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+      }
+    }
+    // The rest of the traffic (regular suppliers, store deliveries), spread
+    // around the moment the demo opens so the doors are busy at any hour.
+    const regulars = CARRIERS.filter((c) => c.id !== "c-labourd");
+    const q15 = 15 * MIN;
+    for (let k = 0; k < w.doors * 2; k++) {
+      const start = Math.round((t0 + r.int(-5 * 60, 10 * 60) * MIN) / q15) * q15;
+      const len = r.pick([30, 45, 60, 75]) * MIN;
+      appts.push({
+        id: `dk-${w.id}-x${k}`,
+        warehouseId: w.id,
+        door: place(start, len),
+        start,
+        end: start + len,
+        direction: r.chance(0.5) ? "in" : "out",
+        carrierId: r.pick(regulars).id,
+        pallets: r.int(4, 33),
+        status: r.chance(0.07) ? "late" : "scheduled",
+      });
+    }
+  }
+  return appts.sort((a, b) => a.start - b.start);
+}
+
+/** What a dock appointment looks like at a given time. */
+export function dockStatus(a: DockAppt, now: number): DockAppt["status"] {
+  if (a.status === "late" && now < a.start + 40 * MIN) return now > a.start + 10 * MIN ? "late" : "scheduled";
+  if (now >= a.end) return "done";
+  if (now >= a.start + 10 * MIN) return "loading";
+  if (now >= a.start - 10 * MIN) return "arrived";
+  return "scheduled";
+}
+
+export function buildFeed(loads: Load[], bids: Bid[], t0: number): FeedEvent[] {
+  const events: FeedEvent[] = [];
+  for (const b of bids.filter((x) => x.status === "pending").slice(0, 8)) {
+    events.push({ id: `f-${b.id}`, at: b.at, kind: "bid", key: "bid", vars: { carrier: b.carrierId, amount: b.amount, load: b.loadId }, loadId: b.loadId });
+  }
+  for (const l of loads) {
+    if (l.departedAt && l.status === "inTransit") events.push({ id: `f-dep-${l.id}`, at: l.departedAt, kind: "departed", key: "departed", vars: { load: l.id, from: l.from, to: l.to }, loadId: l.id });
+    if (l.deliveredAt) events.push({ id: `f-del-${l.id}`, at: l.deliveredAt, kind: "delivered", key: "delivered", vars: { load: l.id, to: l.to }, loadId: l.id });
+  }
+  return events.filter((e) => e.at <= t0).sort((a, b) => b.at - a.at).slice(0, 14);
+}

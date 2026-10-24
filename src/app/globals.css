@@ -1,0 +1,330 @@
+@import "tailwindcss";
+
+/* ===========================================================================
+   Zama design tokens — "itsasoa & seinalea" (the sea and the signal).
+   Dark is the control room at night: blue-black ground, cool ink, the
+   Cantabrian teal as the one action colour. Light is the loading dock by day:
+   warm concrete ground, white surfaces, the same teal, deeper.
+     • accent (teal)    — the ONE action colour: primary buttons, selection.
+     • signal (orange)  — things that move: trucks, live trails, ETAs.
+     • lime             — free capacity: return trips, empty bins, available.
+     • violet           — storage: warehouses, racks, docks.
+   States: green = done · warn = attention · danger = errors · blue = info.
+   =========================================================================== */
+
+/* `dark:` follows the toggle (data-theme) and otherwise the OS preference. */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+}
+
+/* ── Light (the dock by day) ──────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --z-ground: #f3f4f0;
+  --z-surface: #ffffff;
+  --z-surface-2: #eef0eb;
+  --z-surface-3: #e2e5de;
+  --z-glass: rgb(255 255 255 / 0.82);
+  --z-ink: #0d1218;
+  --z-ink-2: #3a4552;
+  --z-ink-3: #5c6875;
+  --z-line: #e0e3dc;
+  --z-line-strong: #c6ccc3;
+  --z-accent: #0c8f81;
+  --z-accent-hover: #0a7a6e;
+  --z-accent-ink: #ffffff;
+  --z-accent-soft: #d8f1ec;
+  --z-accent-text: #07685e;
+  --z-signal: #e4620c;
+  --z-signal-soft: #fde6d4;
+  --z-lime: #4d8a0b;
+  --z-lime-soft: #e5f3d2;
+  --z-violet: #6d3fd9;
+  --z-violet-soft: #ece4fd;
+  --z-green: #047857;
+  --z-green-soft: #d6f3e6;
+  --z-warn: #a85f05;
+  --z-warn-soft: #fcefd2;
+  --z-danger: #c81e1e;
+  --z-danger-soft: #fde2e2;
+  --z-blue: #1d5fd1;
+  --z-blue-soft: #dfeafd;
+  --z-shadow: 0 1px 2px rgb(13 18 24 / 0.06), 0 8px 24px -12px rgb(13 18 24 / 0.18);
+  --z-sea: #cfe3ea;
+  --z-sea-2: #bcd8e2;
+  --z-land: #f7f6f1;
+  --z-land-dot: #dedbd2;
+}
+
+/* ── Dark (the control room at night) ─────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --z-ground: #090d12;
+  --z-surface: #10161d;
+  --z-surface-2: #151c25;
+  --z-surface-3: #1c2531;
+  --z-glass: rgb(16 22 29 / 0.8);
+  --z-ink: #e7edf4;
+  --z-ink-2: #a9b5c4;
+  --z-ink-3: #7d8a9b;
+  --z-line: #212b38;
+  --z-line-strong: #2e3a4a;
+  --z-accent: #2dd4bf;
+  --z-accent-hover: #5eead4;
+  --z-accent-ink: #032420;
+  --z-accent-soft: #0d2f2b;
+  --z-accent-text: #5eead4;
+  --z-signal: #ff8a3d;
+  --z-signal-soft: #3a2112;
+  --z-lime: #a3e635;
+  --z-lime-soft: #23300f;
+  --z-violet: #a78bfa;
+  --z-violet-soft: #241c3d;
+  --z-green: #34d399;
+  --z-green-soft: #0e2a21;
+  --z-warn: #fbbf24;
+  --z-warn-soft: #33270b;
+  --z-danger: #f87171;
+  --z-danger-soft: #3a1717;
+  --z-blue: #60a5fa;
+  --z-blue-soft: #132640;
+  --z-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -16px rgb(0 0 0 / 0.7);
+  --z-sea: #07121c;
+  --z-sea-2: #0c1d2b;
+  --z-land: #131b25;
+  --z-land-dot: #1d2733;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --z-ground: #090d12;
+    --z-surface: #10161d;
+    --z-surface-2: #151c25;
+    --z-surface-3: #1c2531;
+    --z-glass: rgb(16 22 29 / 0.8);
+    --z-ink: #e7edf4;
+    --z-ink-2: #a9b5c4;
+    --z-ink-3: #7d8a9b;
+    --z-line: #212b38;
+    --z-line-strong: #2e3a4a;
+    --z-accent: #2dd4bf;
+    --z-accent-hover: #5eead4;
+    --z-accent-ink: #032420;
+    --z-accent-soft: #0d2f2b;
+    --z-accent-text: #5eead4;
+    --z-signal: #ff8a3d;
+    --z-signal-soft: #3a2112;
+    --z-lime: #a3e635;
+    --z-lime-soft: #23300f;
+    --z-violet: #a78bfa;
+    --z-violet-soft: #241c3d;
+    --z-green: #34d399;
+    --z-green-soft: #0e2a21;
+    --z-warn: #fbbf24;
+    --z-warn-soft: #33270b;
+    --z-danger: #f87171;
+    --z-danger-soft: #3a1717;
+    --z-blue: #60a5fa;
+    --z-blue-soft: #132640;
+    --z-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -16px rgb(0 0 0 / 0.7);
+    --z-sea: #07121c;
+    --z-sea-2: #0c1d2b;
+    --z-land: #131b25;
+    --z-land-dot: #1d2733;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--z-ground);
+  --color-surface: var(--z-surface);
+  --color-surface-2: var(--z-surface-2);
+  --color-surface-3: var(--z-surface-3);
+  --color-glass: var(--z-glass);
+  --color-ink: var(--z-ink);
+  --color-ink-2: var(--z-ink-2);
+  --color-ink-3: var(--z-ink-3);
+  --color-line: var(--z-line);
+  --color-line-strong: var(--z-line-strong);
+  --color-accent: var(--z-accent);
+  --color-accent-hover: var(--z-accent-hover);
+  --color-accent-ink: var(--z-accent-ink);
+  --color-accent-soft: var(--z-accent-soft);
+  --color-accent-text: var(--z-accent-text);
+  --color-signal: var(--z-signal);
+  --color-signal-soft: var(--z-signal-soft);
+  --color-lime: var(--z-lime);
+  --color-lime-soft: var(--z-lime-soft);
+  --color-violet: var(--z-violet);
+  --color-violet-soft: var(--z-violet-soft);
+  --color-green: var(--z-green);
+  --color-green-soft: var(--z-green-soft);
+  --color-warn: var(--z-warn);
+  --color-warn-soft: var(--z-warn-soft);
+  --color-danger: var(--z-danger);
+  --color-danger-soft: var(--z-danger-soft);
+  --color-blue: var(--z-blue);
+  --color-blue-soft: var(--z-blue-soft);
+  --color-sea: var(--z-sea);
+  --color-land: var(--z-land);
+
+  --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  --shadow-card: var(--z-shadow);
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.125rem;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--z-ground);
+    color: var(--z-ink);
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection {
+    background: var(--z-accent-soft);
+    color: var(--z-ink);
+  }
+  :focus-visible {
+    outline: 2px solid var(--z-accent);
+    outline-offset: 2px;
+  }
+  /* Tabular figures wherever numbers line up. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .glass {
+    background: var(--z-glass);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  }
+  .grid-fade {
+    background-image:
+      linear-gradient(to right, var(--z-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--z-line) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse at 50% 30%, black 20%, transparent 70%);
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--z-line-strong) transparent;
+  }
+}
+
+/* MapLibre controls follow the theme. */
+.maplibregl-ctrl-group {
+  background: var(--z-glass) !important;
+  border: 1px solid var(--z-line) !important;
+  box-shadow: var(--z-shadow) !important;
+}
+.maplibregl-ctrl-group button + button {
+  border-top-color: var(--z-line) !important;
+}
+.maplibregl-ctrl-icon {
+  filter: var(--z-ctrl-filter, none);
+}
+:root[data-theme="dark"] .maplibregl-ctrl-icon {
+  filter: invert(0.9);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .maplibregl-ctrl-icon {
+    filter: invert(0.9);
+  }
+}
+.maplibregl-ctrl-attrib {
+  background: var(--z-glass) !important;
+  color: var(--z-ink-3) !important;
+  font-size: 10px !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--z-ink-2) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Landing illustration and live markers. */
+@keyframes z-flow {
+  to {
+    stroke-dashoffset: -48;
+  }
+}
+@keyframes z-ping {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.75;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+@keyframes z-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.z-flow {
+  stroke-dasharray: 10 14;
+  animation: z-flow 1.6s linear infinite;
+}
+.z-flow-slow {
+  stroke-dasharray: 4 8;
+  animation: z-flow 2.8s linear infinite;
+}
+.z-ping {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: z-ping 2.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.z-rise {
+  animation: z-rise 0.5s ease-out both;
+}
+.art-label {
+  font-size: 19px;
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: var(--z-land);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+}
+@media (max-width: 640px) {
+  .art-label {
+    font-size: 30px;
+    stroke-width: 7px;
+  }
+  .art-minor {
+    display: none;
+  }
+}
+/* Space for the phone's home indicator under the bottom nav. */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
