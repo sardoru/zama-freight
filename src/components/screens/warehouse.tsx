@@ -1,9 +1,9 @@
 "use client";
 
-import { ArrowRight, Ban, Bot, Boxes, CalendarClock, ClipboardCheck, Eye, Hand, LockOpen, MoveRight, RotateCcw, Search, Snowflake, Thermometer, X } from "lucide-react";
+import { ArrowRight, Ban, Bot, Boxes, CalendarClock, ClipboardCheck, Eye, Hand, Layers, LockOpen, MoveRight, RotateCcw, Search, Snowflake, Thermometer, X } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
-import { Component, Fragment, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { Page, PageHeader } from "@/components/app/shell";
 import { useIsDark } from "@/components/theme";
 import { Button, Card, Chip, Empty, Field, inputClass, SectionTitle, Segmented, Sheet, Spinner, Stat } from "@/components/ui";
@@ -17,7 +17,10 @@ import { useMedia } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { simNow, useMarket } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
+import { GLBoundary } from "@/components/map/gl-boundary";
+import { webgl2 } from "@/components/map/webgl";
 import type { ColorMode } from "@/components/warehouse/twin";
+import { TwinMount } from "@/components/warehouse/twin-mount";
 
 const Twin = dynamic(() => import("@/components/warehouse/twin"), { ssr: false, loading: () => <TwinLoading /> });
 
@@ -55,31 +58,9 @@ const held = (b: Bin) => b.status === "blocked" || b.status === "quarantine";
 
 type Tab = "inventory" | "docks" | "slotting" | "crossdock";
 
-/** three.js needs WebGL 2. The probe hands its context straight back: browsers cap how many can be alive at once. */
-function hasWebgl(): boolean {
-  try {
-    const gl = document.createElement("canvas").getContext("webgl2");
-    gl?.getExtension("WEBGL_lose_context")?.loseContext();
-    return !!gl;
-  } catch {
-    return false;
-  }
-}
-
 function TwinLoading() {
   const { d } = useI18n();
   return <Spinner label={d.wh.loading3d} className="h-full" />;
-}
-
-/** The rest of the screen works without the 3D: a renderer that can't start only replaces the twin. */
-class TwinBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-  render() {
-    return this.state.failed ? this.props.fallback : this.props.children;
-  }
 }
 
 export function WarehouseScreen() {
@@ -101,7 +82,12 @@ export function WarehouseScreen() {
     return q && WAREHOUSE.has(q) ? q : "w-oiartzun";
   });
   const w = WAREHOUSE.get(wid)!;
-  const [webgl] = useState(hasWebgl);
+  // three.js needs WebGL 2: the same cached probe as the map's (webgl2 hands its context straight back).
+  const [webgl] = useState(webgl2);
+  // The rest of the screen works without the 3D: no WebGL, or a renderer that can't start, puts the
+  // stock list in the twin's place and opens the tabs below on the dock timeline.
+  const [twinFailed, setTwinFailed] = useState(false);
+  const twin3d = webgl && !twinFailed;
   const [mode, setMode] = useState<ColorMode>("status");
   const [explode, setExplode] = useState(0);
   const [showEmpty, setShowEmpty] = useState(false);
@@ -111,7 +97,8 @@ export function WarehouseScreen() {
   const [resetKey, setResetKey] = useState(0);
   // The position to centre on, with a counter: asking for the same one again re-centres the camera.
   const [focus, setFocus] = useState<{ loc: string; n: number } | null>(null);
-  const [tab, setTab] = useState<Tab>("inventory");
+  const [tabChoice, setTab] = useState<Tab | null>(null);
+  const tab: Tab = tabChoice ?? (twin3d ? "inventory" : "docks");
   const [onlyDue, setOnlyDue] = useState(false);
   const tabs = useRef<HTMLDivElement>(null);
 
@@ -217,7 +204,6 @@ export function WarehouseScreen() {
     />
   ) : null;
 
-  const noGl = <div className="grid h-full min-h-40 place-items-center p-6 text-center text-sm text-ink-2">{d.wh.noWebgl}</div>;
 
   return (
     <Page className="max-w-none">
@@ -276,27 +262,30 @@ export function WarehouseScreen() {
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        {webgl ? (
+        {twin3d ? (
           <Card className="relative h-[58dvh] min-h-[22rem] overflow-hidden lg:h-[64dvh]">
-            <TwinBoundary fallback={noGl}>
-              <Twin
-                warehouse={w}
-                bins={bins}
-                docks={atDocks}
-                mode={mode}
-                explode={explode}
-                showEmpty={showEmpty}
-                showRobots={showRobots}
-                dark={dark}
-                selected={selected}
-                onSelect={setSelected}
-                onHover={setHover}
-                resetKey={resetKey}
-                focusLoc={focus?.loc ?? null}
-                focusKey={focus?.n ?? 0}
-                now={now}
-              />
-            </TwinBoundary>
+            <TwinMount label={d.wh.twinLabel.replace("{{name}}", w.name).replace("{{fill}}", f.pct(kpi.occupancy))}>
+              <GLBoundary fallback={null} onError={() => setTwinFailed(true)}>
+                <Twin
+                  warehouse={w}
+                  bins={bins}
+                  docks={atDocks}
+                  mode={mode}
+                  explode={explode}
+                  showEmpty={showEmpty}
+                  showRobots={showRobots}
+                  dark={dark}
+                  selected={selected}
+                  onSelect={setSelected}
+                  onHover={setHover}
+                  resetKey={resetKey}
+                  focusLoc={focus?.loc ?? null}
+                  focusKey={focus?.n ?? 0}
+                  now={now}
+                  fallback={<p>{d.wh.noWebgl}</p>}
+                />
+              </GLBoundary>
+            </TwinMount>
             <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-wrap items-start gap-2 p-2">
               <Segmented value={mode} onChange={setMode} options={modes} size="sm" label={d.wh.colorBy} className="glass pointer-events-auto shadow-card" />
               <div className="glass pointer-events-auto flex items-center gap-2 rounded-xl border border-line px-2.5 py-1 shadow-card pointer-coarse:py-0.5">
@@ -335,7 +324,13 @@ export function WarehouseScreen() {
             </div>
           </Card>
         ) : (
-          <Card>{noGl}</Card>
+          <div className="min-w-0 space-y-2">
+            <p role="status" className="flex items-start gap-2 rounded-xl border border-line bg-warn-soft px-3 py-2 text-sm font-medium text-warn">
+              <Layers className="mt-0.5 size-4 shrink-0" aria-hidden />
+              {twinFailed ? d.wh.crashed : d.wh.noWebgl}
+            </p>
+            <Inventory bins={bins} onlyDue={onlyDue} onOnlyDue={setOnlyDue} onPick={show} onCount={count} />
+          </div>
         )}
         {wide ? <aside className="self-start">{binPanel ?? <Empty className="h-full">{d.wh.hint}</Empty>}</aside> : null}
       </div>

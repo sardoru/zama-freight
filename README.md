@@ -145,6 +145,19 @@ Pure functions in `src/lib/checks.ts` and `src/lib/cabotage.ts`, checked against
 - If the tiles can't be reached (the TileJSON fails, the first tiles all fail, or nothing arrives within 25 s) the map
   switches to a **schematic fallback** drawn from `src/data/coast.ts`, and tries the real basemap again when the browser
   comes back online. A lost WebGL context remounts the map instead of leaving it blank.
+- **Without WebGL2** (or if the 3D map crashes) the screen keeps its KPIs and panels and draws the corridor as an SVG
+  schematic with the live trucks, loads, return trips and warehouses, under a translated notice.
+- **Made once per visit to the app**: the app layout mounts the map the first time `/{lang}/app` opens and keeps it,
+  hidden with `<Activity mode="hidden">`, while other screens are shown, so coming back reuses its tiles, camera and
+  overlay (a new map per visit used to leak about 1 MB through deck.gl's overlay). deck.gl is its own chunk, loaded
+  after the basemap's first `idle`; the trucks are redrawn only while they are shown and moving, as often as they move
+  half a pixel, and an idle or hidden map draws nothing.
+- **Credits** are built from the dictionaries and rendered by the app layout, so they are in the server HTML and show
+  from the first paint; they fold into an (i) button on the first pan or zoom, or after five seconds on phones
+  ([OSMF attribution guidelines](https://osmfoundation.org/wiki/Licence/Attribution_Guidelines)). MapLibre's own
+  controls get their labels from the dictionaries too (`locale`).
+- The MapLibre worker is copied to `public/vendor/maplibre-gl-worker-<version>.mjs` by `scripts/copy-worker.mjs` and
+  served with `Cache-Control: public, max-age=31536000, immutable` (`next.config.ts`).
 
 ### Warehouse digital twin (`src/components/warehouse`, `src/components/screens/warehouse.tsx`)
 
@@ -167,6 +180,8 @@ urban hub and the Adour depot in the port of Bayonne. Names that borrow a real s
   and KPIs (occupancy, A movers, counts due, expiring stock, doors busy now).
 - Light on phones: capped pixel ratio, smaller shadow maps, shadows redrawn only when something moves, and no drawing
   while the twin is scrolled out of view.
+- three.js loads after the KPIs and lists have painted, when the browser is idle and the twin is on screen. Without
+  WebGL2 (or if the renderer fails) the stock list takes the twin's place and the tabs open on the dock timeline.
 
 ### Everything else
 
@@ -358,8 +373,34 @@ before relying on any of it.
 
 - Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, tiles by
   [OpenFreeMap](https://openfreemap.org), schema by [OpenMapTiles](https://openmaptiles.org).
-- Terrain: [Mapzen Terrain Tiles](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) on AWS Open Data.
+- Terrain: [Mapzen Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) on AWS Open Data, with one credit line
+  per source dataset as [Tilezen asks](https://github.com/tilezen/joerd/blob/master/docs/attribution.md):
+  - Europe terrain data produced using Copernicus data and information funded by the European Union – EU-DEM layers.
+  - SRTM and GMTED2010 terrain data courtesy of the U.S. Geological Survey.
+  - ETOPO1 bathymetry: U.S. National Oceanic and Atmospheric Administration.
+
+  These are the sources actually in the tiles we show: the `X-Imagery-Sources` header of every Terrarium tile over the
+  map's bounds (-3.4, 42.6 to -0.2, 44.3) lists ETOPO1, GMTED2010, SRTM and EU-DEM at zooms 7 to 15 (the map allows
+  7.5 and up). The map and the landing footer show all of them in every language (`map.credits`, `landing.mapData`).
 - Fonts: Manrope and JetBrains Mono, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
 - The coast outline, road graph, companies, people and plates were drawn or invented for this prototype. Plates use a
   `DEMO-` format, and the invented names were web-checked against real businesses
   ([docs/fictional-names.md](docs/fictional-names.md)); formal registry checks are still pending.
+
+### Where the coast outline and the road graph come from
+
+`src/data/coast.ts` (coast, Bidasoa, Adour, Urumea) and `src/data/network.ts` (junctions and road shapes) were written
+by hand, as approximate coordinates, by the session that built the prototype (commit 50a3b22). No dataset was
+imported, and that session left no record of what it looked at.
+
+Checked against OpenStreetMap (Overpass, 24 October 2026), they are not copies or simplifications of OSM geometry,
+which at this three-decimal precision would sit within about 50 m of it:
+
+| File | Vertices compared | Distance to the nearest OSM way |
+| --- | --- | --- |
+| `coast.ts` `COAST` | 57 inside 43.25–43.56 N, 2.10–1.45 W | median 128 m, 90th percentile 515 m, max 1.2 km (`natural=coastline`) |
+| `network.ts` | 71 coordinate pairs | median 144 m, 90th percentile 438 m, max 1.0 km (motorway to secondary) |
+
+Motorway junctions sit 30 m to 1.25 km off the OSM carriageways. The outline may still have been traced by eye from
+OSM-based maps, so wherever it is drawn it is credited to OpenStreetMap as a precaution: the map's SVG schematic
+(without WebGL) does, and issue #17 adds the same credit to the share card and the landing illustration.

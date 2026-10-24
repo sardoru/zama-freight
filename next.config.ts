@@ -20,7 +20,15 @@ const nextConfig: NextConfig = {
     },
   },
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    return [
+      { source: "/:path*", headers: securityHeaders },
+      // The MapLibre worker is copied under its package version (scripts/copy-worker.mjs): a new
+      // version is a new URL, so the 150 KB file can be cached for good.
+      {
+        source: "/vendor/:file(maplibre-gl-worker-[^/]+\\.mjs)",
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+    ];
   },
 };
 
