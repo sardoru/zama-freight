@@ -199,6 +199,20 @@ export function buildBins(w: Warehouse): Bin[] {
   return bins;
 }
 
+const CONTENT = ["sku", "qty", "lot", "expiryDays", "abc", "picksPerDay"] as const;
+
+/**
+ * Applies a saved patch to a seeded bin. JSON drops `undefined`, so a patch that
+ * empties a position or brings a pallet into it replaces the seeded contents
+ * instead of merging with them.
+ */
+export function applyBinPatch(b: Bin, p: Partial<Bin> | undefined): Bin {
+  if (!p) return b;
+  const out: Bin = { ...b };
+  if (p.status === "empty" || p.sku !== undefined) for (const k of CONTENT) delete out[k];
+  return { ...out, ...p };
+}
+
 /** Walking metres from the dock face to a pick position (bays run away from the doors). */
 export const travelMeters = (bin: Pick<Bin, "bay" | "level">) => 6 + bin.bay * 2.8 + bin.level * 4.5;
 

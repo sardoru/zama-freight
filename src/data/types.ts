@@ -176,6 +176,8 @@ export interface Bin {
   /** Days since the last cycle count. */
   countedDaysAgo?: number;
   tempC?: number;
+  /** Status to restore when a block is lifted. */
+  heldFrom?: BinStatus;
 }
 
 export interface Sku {

@@ -22,10 +22,24 @@ export interface Fmt {
 
 const cache = new Map<Locale, Fmt>();
 
+const hasIntl = (tag: string) => Intl.DateTimeFormat.supportedLocalesOf([tag]).length > 0 && Intl.NumberFormat.supportedLocalesOf([tag]).length > 0;
+
+/** Basque relative times, for browsers without Basque locale data. */
+function euRel(min: number): string {
+  const a = Math.abs(min);
+  if (a < 1) return "orain";
+  const [v, u] = a < 60 ? [Math.round(a), "min"] : a < 48 * 60 ? [Math.round(a / 60), "h"] : [Math.round(a / 1440), "egun"];
+  return min > 0 ? `${v} ${u} barru` : `duela ${v} ${u}`;
+}
+
 export function makeFmt(lang: Locale): Fmt {
   const hit = cache.get(lang);
   if (hit) return hit;
-  const tag = INTL_LOCALE[lang];
+  // Chromium ships no Basque locale data and would silently format eu-ES as US English;
+  // Spanish conventions (24 h, decimal comma, € after the number) are the right fallback.
+  const want = INTL_LOCALE[lang];
+  const tag = hasIntl(want) ? want : "es-ES";
+  const euFallback = lang === "eu" && tag !== want;
   const money = new Intl.NumberFormat(tag, { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
   const money2 = new Intl.NumberFormat(tag, { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const nums = [0, 1, 2].map((d) => new Intl.NumberFormat(tag, { maximumFractionDigits: d, minimumFractionDigits: 0 }));
@@ -37,7 +51,11 @@ export function makeFmt(lang: Locale): Fmt {
   const min0 = unit("minute");
   const h0 = unit("hour");
   const time = new Intl.DateTimeFormat(tag, { hour: "2-digit", minute: "2-digit", timeZone: TZ });
-  const dayTime = new Intl.DateTimeFormat(tag, { weekday: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: TZ });
+  const dayTime = new Intl.DateTimeFormat(
+    tag,
+    // No Spanish weekday names in the Basque fallback.
+    euFallback ? { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit", timeZone: TZ } : { weekday: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: TZ },
+  );
   const rel = new Intl.RelativeTimeFormat(tag, { numeric: "auto", style: "short" });
   const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" });
 
@@ -45,7 +63,7 @@ export function makeFmt(lang: Locale): Fmt {
     money: (v) => money.format(v),
     money2: (v) => money2.format(v),
     num: (v, d = 0) => nums[Math.min(2, Math.max(0, d))].format(v),
-    pct: (v) => pct.format(v),
+    pct: (v) => (euFallback ? `% ${nums[0].format(v * 100)}` : pct.format(v)),
     km: (v) => km1.format(v),
     meters: (v) => (v >= 1000 ? km1.format(v / 1000) : m0.format(v)),
     kg: (v) => kg0.format(v),
@@ -60,6 +78,7 @@ export function makeFmt(lang: Locale): Fmt {
     dayTime: (ts) => (dayKey.format(ts) === dayKey.format(Date.now()) ? time.format(ts) : dayTime.format(ts)),
     rel: (ts, now) => {
       const diff = (ts - now) / 60_000;
+      if (euFallback) return euRel(diff);
       const a = Math.abs(diff);
       if (a < 1) return rel.format(0, "minute");
       if (a < 60) return rel.format(Math.round(diff), "minute");

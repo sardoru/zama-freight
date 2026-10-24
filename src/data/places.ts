@@ -33,8 +33,10 @@ export interface Place {
   lnglat: LngLat;
   country: "ES" | "FR";
   kind: PlaceKind;
-  /** Inside Donostia's low-emission zone (vehicles need an eco label). */
+  /** Inside Donostia's low-emission zone (ZBE). */
   zbe?: boolean;
+  /** Inside the Pays Basque low-emission zone (ZFE-m, Tarnos to Hendaye). */
+  zfe?: boolean;
   /** Shown as a hub on the landing page and the map's fly-to list. */
   hub?: boolean;
 }
@@ -54,13 +56,13 @@ export const PLACES: Record<PlaceId, Place> = {
   irun: { id: "irun", names: n("Irun", "Irun", "Irun", "Irun", "Ирун"), lnglat: [-1.7894, 43.3381], country: "ES", kind: "city", hub: true },
   zaisa: { id: "zaisa", names: n("Zaisa (Irun)", "Zaisa (Irun)", "Zaisa (Irun)", "Zaisa (Irun)", "Заиса (Ирун)"), lnglat: [-1.766, 43.3378], country: "ES", kind: "industrial" },
   hondarribia: { id: "hondarribia", names: n("Hondarribia", "Hondarribia", "Fontarrabie", "Hondarribia", "Ондаррибия"), lnglat: [-1.7957, 43.3675], country: "ES", kind: "town" },
-  hendaye: { id: "hendaye", names: n("Hendaya", "Hendaia", "Hendaye", "Hendaye", "Андай"), lnglat: [-1.7744, 43.3586], country: "FR", kind: "town" },
-  sjdl: { id: "sjdl", names: n("San Juan de Luz", "Donibane Lohizune", "Saint-Jean-de-Luz", "Saint-Jean-de-Luz", "Сен-Жан-де-Люз"), lnglat: [-1.6634, 43.3881], country: "FR", kind: "town" },
-  bidart: { id: "bidart", names: n("Bidart", "Bidarte", "Bidart", "Bidart", "Бидар"), lnglat: [-1.5911, 43.437], country: "FR", kind: "town" },
-  biarritz: { id: "biarritz", names: n("Biarritz", "Miarritze", "Biarritz", "Biarritz", "Биарриц"), lnglat: [-1.5586, 43.4832], country: "FR", kind: "city", hub: true },
-  anglet: { id: "anglet", names: n("Anglet", "Angelu", "Anglet", "Anglet", "Англет"), lnglat: [-1.516, 43.485], country: "FR", kind: "town" },
-  bayonne: { id: "bayonne", names: n("Bayona", "Baiona", "Bayonne", "Bayonne", "Байонна"), lnglat: [-1.4748, 43.4929], country: "FR", kind: "city", hub: true },
-  bayonnePort: { id: "bayonnePort", names: n("Puerto de Bayona", "Baionako portua", "Port de Bayonne", "Port of Bayonne", "Порт Байонны"), lnglat: [-1.487, 43.511], country: "FR", kind: "port" },
+  hendaye: { id: "hendaye", names: n("Hendaya", "Hendaia", "Hendaye", "Hendaye", "Андай"), lnglat: [-1.7744, 43.3586], country: "FR", kind: "town", zfe: true },
+  sjdl: { id: "sjdl", names: n("San Juan de Luz", "Donibane Lohizune", "Saint-Jean-de-Luz", "Saint-Jean-de-Luz", "Сен-Жан-де-Люз"), lnglat: [-1.6634, 43.3881], country: "FR", kind: "town", zfe: true },
+  bidart: { id: "bidart", names: n("Bidart", "Bidarte", "Bidart", "Bidart", "Бидар"), lnglat: [-1.5911, 43.437], country: "FR", kind: "town", zfe: true },
+  biarritz: { id: "biarritz", names: n("Biarritz", "Miarritze", "Biarritz", "Biarritz", "Биарриц"), lnglat: [-1.5586, 43.4832], country: "FR", kind: "city", zfe: true, hub: true },
+  anglet: { id: "anglet", names: n("Anglet", "Angelu", "Anglet", "Anglet", "Англет"), lnglat: [-1.516, 43.485], country: "FR", kind: "town", zfe: true },
+  bayonne: { id: "bayonne", names: n("Bayona", "Baiona", "Bayonne", "Bayonne", "Байонна"), lnglat: [-1.4748, 43.4929], country: "FR", kind: "city", zfe: true, hub: true },
+  bayonnePort: { id: "bayonnePort", names: n("Puerto de Bayona", "Baionako portua", "Port de Bayonne", "Port of Bayonne", "Порт Байонны"), lnglat: [-1.487, 43.511], country: "FR", kind: "port", zfe: true },
 };
 
 export const PLACE_IDS = Object.keys(PLACES) as PlaceId[];
