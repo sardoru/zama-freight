@@ -172,7 +172,8 @@ test.describe("error page", () => {
     // The shell is always there.
     await expect(page.locator("header").getByText(es.common.demoData)).toBeVisible();
     const alert = page.getByRole("alert").filter({ hasText: es.errorPage.title });
-    const board = page.getByRole("heading", { level: 1, name: es.loads.title });
+    // The board's own tabs, not its title: the shell shows the title from the server HTML before the screen mounts.
+    const board = page.getByRole("radiogroup", { name: es.loads.title });
     await expect(alert.or(board)).toBeVisible();
     if (await alert.isVisible()) {
       // Our fallback, translated, with both ways out.

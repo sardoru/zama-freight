@@ -582,7 +582,10 @@ function DispatchActions({ load }: { load: Load }) {
   const blocked = new Map(fleet.map((v) => [v.id, blockReason(runVerdict(load, v, rules.loads, rules), d, day)]));
   const usable = (id: string) => !busy.has(id) && !blocked.get(id);
   const [picked, setPicked] = useState<string | null>(null);
-  const vehicleId = load.vehicleId ?? (picked && usable(picked) ? picked : (fleet.find((v) => usable(v.id))?.id ?? ""));
+  // Booked: the truck you pick, else the one the market planned on it (while it is free and allowed), else the first
+  // usable one. Once assigned, its own truck.
+  const planned = load.vehicleId && usable(load.vehicleId) ? load.vehicleId : undefined;
+  const vehicleId = load.status !== "booked" ? (load.vehicleId ?? "") : ((picked && usable(picked) ? picked : undefined) ?? planned ?? fleet.find((v) => usable(v.id))?.id ?? "");
   // Nothing usable because of the rules: say why.
   const reason = load.status === "booked" && !vehicleId ? (fleet.map((v) => blocked.get(v.id)).find(Boolean) ?? null) : null;
   if (load.status === "delivered" || load.status === "cancelled") return null;
