@@ -7,7 +7,8 @@ export async function generateMetadata({ params }: LayoutProps<"/[lang]/app">): 
   const { lang } = await params;
   if (!isLocale(lang)) return {};
   // The demo is an app, not content: keep it out of search results.
-  return { title: getDict(lang).meta.appTitle, robots: { index: false, follow: true } };
+  // A plain string here would clear the root layout's "%s · Zama" template for the pages below.
+  return { title: { default: getDict(lang).meta.appTitle, template: "%s · Zama" }, robots: { index: false, follow: true } };
 }
 
 export default function AppLayout({ children }: LayoutProps<"/[lang]/app">) {
