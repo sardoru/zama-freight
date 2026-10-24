@@ -646,6 +646,7 @@ export const en = {
     assigned: "{{plate}} assigned to {{load}}",
     departed: "{{load}} left {{from}} for {{to}}",
     delivered: "{{load}} delivered in {{to}}",
+    expired: "{{load}} expired: no carrier took it in time",
     return: "{{load}} rides an empty return with {{carrier}} ({{from}} → {{to}})",
     returnPosted: "{{carrier}} posted a return trip {{from}} → {{to}}",
     posted: "{{shipper}} posted {{load}}: {{from}} → {{to}}",

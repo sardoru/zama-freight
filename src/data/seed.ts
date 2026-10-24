@@ -9,7 +9,7 @@ import { CARRIERS, ME, VEHICLE, VEHICLES } from "./companies";
 import { route } from "./network";
 import { PLACES, type PlaceId } from "./places";
 import { WAREHOUSES } from "./warehouses";
-import type { Bid, Carrier, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType } from "./types";
+import type { Bid, Carrier, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType, Warehouse } from "./types";
 
 export const MIN = 60_000;
 export const HOUR = 60 * MIN;
@@ -94,7 +94,11 @@ export const CARRIES: Record<VehicleType, VehicleType[]> = {
 
 export const driveMs = (l: Pick<Load, "from" | "to">) => route(l.from, l.to).minutes * MIN;
 
-export function buildLoads(t0: number): Load[] {
+/**
+ * The demo day's loads around t0. `rename` gives them fresh ids when the day is
+ * re-seeded mid-session (the canonical ZM-4101…4130 are only used once).
+ */
+export function buildLoads(t0: number, rename: (id: string) => string = (id) => id): Load[] {
   return SPECS.map((s) => {
     const q = quote({ from: s.from, to: s.to, vehicle: s.vehicle, express: s.express, tailLift: s.tailLift });
     const r = rng(hash(s.id));
@@ -112,7 +116,7 @@ export function buildLoads(t0: number): Load[] {
     }
     const booked = s.status !== "open";
     return {
-      id: s.id,
+      id: rename(s.id),
       shipperId: s.shipper,
       from: s.from,
       to: s.to,
@@ -209,7 +213,8 @@ export function buildBids(loads: Load[], t0: number): Bid[] {
         vehicleId: v.id,
         amount: accepted && l.price ? l.price : Math.round((l.target * (0.86 + r.next() * 0.24)) / 5) * 5,
         pickupEta: l.pickupAt + r.int(-45, 75) * MIN,
-        at: Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR),
+        // Never before the load was posted (a bid older than its load reads as left over from another one).
+        at: Math.max(l.createdAt, Math.min(t0 - r.int(5, 240) * MIN, l.status === "open" ? t0 : l.pickupAt - HOUR)),
         status: l.status === "open" ? "pending" : accepted ? "accepted" : "rejected",
       });
     }
@@ -237,52 +242,77 @@ export function fitsReturn(l: Load, rt: ReturnTrip, vehicleType: VehicleType): b
   return nearFrom && nearTo && Math.abs(l.pickupAt - rt.departAt) <= 6 * HOUR;
 }
 
+type Rand = ReturnType<typeof rng>;
+
+/** How far past t0 the seeded regular dock traffic reaches (the director schedules the rest). */
+export const DOCKS_SEEDED_AHEAD = 10 * HOUR;
+
+/** A door of the warehouse with nothing booked within 15 minutes of [start, end); a random door if all are taken. */
+function freeDoor(appts: readonly DockAppt[], doors: number, start: number, end: number, r: Rand): number {
+  const gap = 15 * MIN;
+  const first = r.int(0, doors - 1);
+  for (let d = 0; d < doors; d++) {
+    const door = (first + d) % doors;
+    if (appts.every((a) => a.door !== door || a.end + gap <= start || end + gap <= a.start)) return door;
+  }
+  return first;
+}
+
+/** The appointments a load needs at a warehouse: loading at its origin, unloading at its destination. */
+export function loadDocks(l: Load, w: Warehouse, appts: readonly DockAppt[], r: Rand): DockAppt[] {
+  const out: DockAppt[] = [];
+  if (l.status === "cancelled") return out;
+  if (l.from === w.place) {
+    const start = l.pickupAt - 30 * MIN;
+    const end = start + 45 * MIN;
+    out.push({ id: `dk-${w.id}-${l.id}-o`, warehouseId: w.id, door: freeDoor(appts, w.doors, start, end, r), start, end, direction: "out", carrierId: l.carrierId ?? "c-txingudi", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+  }
+  if (l.to === w.place) {
+    const start = (l.departedAt ?? l.pickupAt) + driveMs(l);
+    const end = start + 50 * MIN;
+    out.push({ id: `dk-${w.id}-${l.id}-i`, warehouseId: w.id, door: freeDoor([...appts, ...out], w.doors, start, end, r), start, end, direction: "in", carrierId: l.carrierId ?? "c-baltic", loadId: l.id, pallets: l.pallets, status: "scheduled" });
+  }
+  return out;
+}
+
+const REGULARS = CARRIERS.filter((c) => c.id !== "c-labourd");
+
+/**
+ * The rest of a warehouse's traffic (regular suppliers, store deliveries)
+ * starting in [from, to): about two appointments per door every 15 hours.
+ */
+export function regularDocks(w: Warehouse, from: number, to: number, appts: readonly DockAppt[], r: Rand): DockAppt[] {
+  const q15 = 15 * MIN;
+  const n = Math.floor((w.doors * 2 * (to - from)) / (15 * HOUR) + r.next());
+  const out: DockAppt[] = [];
+  for (let k = 0; k < n; k++) {
+    const start = Math.round((from + r.next() * (to - from)) / q15) * q15;
+    const len = r.pick([30, 45, 60, 75]) * MIN;
+    out.push({
+      // Unique per window: the windows of one session never start at the same moment.
+      id: `dk-${w.id}-x${from.toString(36)}-${k}`,
+      warehouseId: w.id,
+      door: freeDoor([...appts, ...out], w.doors, start, start + len, r),
+      start,
+      end: start + len,
+      direction: r.chance(0.5) ? "in" : "out",
+      carrierId: r.pick(REGULARS).id,
+      pallets: r.int(4, 33),
+      status: r.chance(0.07) ? "late" : "scheduled",
+    });
+  }
+  return out;
+}
+
 export function buildDocks(loads: Load[], t0: number): DockAppt[] {
   const appts: DockAppt[] = [];
   for (const w of WAREHOUSES) {
     const r = rng(hash(`docks:${w.id}`));
-    const busy: number[][] = Array.from({ length: w.doors }, () => []);
-    const place = (start: number, len: number) => {
-      for (let d = 0; d < w.doors; d++) {
-        const door = (d + r.int(0, w.doors - 1)) % w.doors;
-        if (busy[door].every((s) => Math.abs(s - start) > len + 15 * MIN)) {
-          busy[door].push(start);
-          return door;
-        }
-      }
-      return r.int(0, w.doors - 1);
-    };
-    for (const l of loads) {
-      if (l.status === "cancelled") continue;
-      const dur = driveMs(l);
-      if (l.from === w.place) {
-        const start = l.pickupAt - 30 * MIN;
-        appts.push({ id: `dk-${w.id}-${l.id}-o`, warehouseId: w.id, door: place(start, 45 * MIN), start, end: start + 45 * MIN, direction: "out", carrierId: l.carrierId ?? "c-txingudi", loadId: l.id, pallets: l.pallets, status: "scheduled" });
-      }
-      if (l.to === w.place) {
-        const eta = (l.departedAt ?? l.pickupAt) + dur;
-        appts.push({ id: `dk-${w.id}-${l.id}-i`, warehouseId: w.id, door: place(eta, 50 * MIN), start: eta, end: eta + 50 * MIN, direction: "in", carrierId: l.carrierId ?? "c-baltic", loadId: l.id, pallets: l.pallets, status: "scheduled" });
-      }
-    }
-    // The rest of the traffic (regular suppliers, store deliveries), spread
-    // around the moment the demo opens so the doors are busy at any hour.
-    const regulars = CARRIERS.filter((c) => c.id !== "c-labourd");
-    const q15 = 15 * MIN;
-    for (let k = 0; k < w.doors * 2; k++) {
-      const start = Math.round((t0 + r.int(-5 * 60, 10 * 60) * MIN) / q15) * q15;
-      const len = r.pick([30, 45, 60, 75]) * MIN;
-      appts.push({
-        id: `dk-${w.id}-x${k}`,
-        warehouseId: w.id,
-        door: place(start, len),
-        start,
-        end: start + len,
-        direction: r.chance(0.5) ? "in" : "out",
-        carrierId: r.pick(regulars).id,
-        pallets: r.int(4, 33),
-        status: r.chance(0.07) ? "late" : "scheduled",
-      });
-    }
+    const here: DockAppt[] = [];
+    for (const l of loads) here.push(...loadDocks(l, w, here, r));
+    // Spread around the moment the demo opens so the doors are busy at any hour.
+    here.push(...regularDocks(w, t0 - 5 * HOUR, t0 + DOCKS_SEEDED_AHEAD, here, r));
+    appts.push(...here);
   }
   return appts.sort((a, b) => a.start - b.start);
 }

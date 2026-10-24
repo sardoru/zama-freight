@@ -645,6 +645,7 @@ export const ru: Dict = {
     assigned: "Машина {{plate}} назначена на {{load}}",
     departed: "Груз {{load}} отправлен: {{from}} → {{to}}",
     delivered: "Груз {{load}} доставлен: {{to}}",
+    expired: "Груз {{load}} снят с биржи: перевозчик не нашёлся вовремя",
     return: "{{carrier}} берёт {{load}} в порожний обратный рейс ({{from}} → {{to}})",
     returnPosted: "{{carrier}} размещает обратный рейс {{from}} → {{to}}",
     posted: "{{shipper}} размещает {{load}}: {{from}} → {{to}}",

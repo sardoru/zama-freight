@@ -645,6 +645,7 @@ export const fr: Dict = {
     assigned: "{{plate}} affecté à {{load}}",
     departed: "{{load}} a quitté {{from}} pour {{to}}",
     delivered: "{{load}} livré à {{to}}",
+    expired: "{{load}} a expiré sans transporteur",
     return: "{{load}} voyage sur un retour à vide de {{carrier}} ({{from}} → {{to}})",
     returnPosted: "{{carrier}} a publié un retour à vide {{from}} → {{to}}",
     posted: "{{shipper}} a publié {{load}} : {{from}} → {{to}}",

@@ -645,6 +645,7 @@ export const eu: Dict = {
     assigned: "{{plate}} ibilgailua {{load}} kargari esleituta",
     departed: "{{load}} karga abiatu da: {{from}} → {{to}}",
     delivered: "{{load}} karga entregatuta: {{to}}",
+    expired: "{{load}} karga iraungi da garraiolaririk gabe",
     return: "{{load}} karga {{carrier}} garraiolariaren hutsik itzultzeko bidaian doa ({{from}} → {{to}})",
     returnPosted: "{{carrier}} garraiolariak itzulerako bidaia bat argitaratu du: {{from}} → {{to}}",
     posted: "{{shipper}} kargatzaileak {{load}} karga argitaratu du: {{from}} → {{to}}",

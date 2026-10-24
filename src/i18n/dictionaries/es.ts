@@ -645,6 +645,7 @@ export const es: Dict = {
     assigned: "{{plate}} asignado a {{load}}",
     departed: "{{load}} sale de {{from}} hacia {{to}}",
     delivered: "{{load}} entregada en {{to}}",
+    expired: "{{load}} caduca sin adjudicar",
     return: "{{load}} aprovecha un retorno en vacío de {{carrier}} ({{from}} → {{to}})",
     returnPosted: "{{carrier}} publica un retorno {{from}} → {{to}}",
     posted: "{{shipper}} publica {{load}}: {{from}} → {{to}}",

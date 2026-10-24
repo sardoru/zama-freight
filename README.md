@@ -187,13 +187,19 @@ urban hub and the Adour depot in the port of Bayonne. Names that borrow a real s
 
 The market is seeded relative to the moment you open the demo (`src/data/seed.ts`), so trucks are already on the road
 and pickups are always a few hours away. A **simulated clock** runs at ×20 by default (click the clock for ×1 or ×60),
-and a director (`tick()` in `src/store/market.ts`) keeps the market alive every second: carriers bid, other shippers
-accept the best bid as pickup nears, booked loads get vehicles, trucks depart and arrive, new loads appear, empty
-return trips get filled.
+and a director (`src/store/director.ts`) keeps the market alive: carriers bid on loads they have a truck for, other
+shippers accept the best bid as pickup nears, booked loads get vehicles (one job per truck), trucks depart and arrive,
+new loads appear, unbooked ones get a later pickup or expire, carriers post their empty legs home and shippers fill
+them, and the dock schedule rolls forward. It runs on simulated time (rates per simulated minute, in steps of at most
+five minutes), so a background tab that the browser throttles to one tick a minute sees the same market, and it keeps
+at least six trucks on the road. After more than six simulated hours without a tick (a sleeping laptop, a frozen tab)
+the day is re-seeded around the current time.
 
 What you create yourself (loads you post, your bids, return trips, dock bookings, warehouse changes, role and map
-settings) is saved in your browser (`localStorage`, key `zama-demo-v1`) together with the market clock, so a reload
-carries on where you left off: a truck that was halfway is still halfway. *Reset demo* in the ⋯ menu clears it.
+settings) is saved in your browser (`localStorage`, key `zama-demo-v1`, schema version 2, see `src/store/saved.ts`)
+together with the market clock, so a reload carries on where you left off: a truck that was halfway is still halfway.
+Saved records are checked against the catalogues when the demo opens, and any that don't fit are dropped. *Reset demo*
+in the ⋯ menu clears it.
 
 ---
 
@@ -215,7 +221,7 @@ src/
   data/                  places, road graph & routing, coast outline, companies, warehouses & bins, seeded market
   i18n/                  locales, dictionaries (en is the source; the others are type-checked against it)
   lib/                   pricing, compliance checks, solar position, geodesy, formatting
-  store/                 the market store (actions + simulation) and the shared clock
+  store/                 the market store (actions), the director (simulation), saved state and the shared clock
   proxy.ts               sends / and any un-prefixed path to the reader's language
 scripts/                 copy-worker.mjs (MapLibre worker → public/vendor), screens.mjs (README screenshots)
 ```
