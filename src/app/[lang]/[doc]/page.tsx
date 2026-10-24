@@ -7,7 +7,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { SiteFooter, SiteHeader } from "@/components/site-chrome";
-import { INTL_LOCALE, isLocale, type Locale } from "@/i18n/config";
+import { INTL_LOCALE, isLocale, OG_LOCALE, type Locale } from "@/i18n/config";
 import { getDict } from "@/i18n/get-dict";
 import type { Dict } from "@/i18n/types";
 import { DOC_SLUGS, DOCS, docAlternates, docFromSlug, docHref, ISSUES_URL, type Doc } from "@/lib/doc-routes";
@@ -34,11 +34,15 @@ export async function generateMetadata({ params }: PageProps<"/[lang]/[doc]">): 
   const { lang, doc } = await resolve(params);
   const d = getDict(lang);
   const text = d[doc];
+  const title = `${text.title} · ${d.meta.siteName}`;
+  // A page's openGraph replaces the layout's whole object, so the share card is named again here.
+  const card = { url: `/${lang}/opengraph-image`, width: 1200, height: 630, alt: d.meta.ogAlt };
   return {
     title: text.title,
     description: text.lead,
     alternates: { canonical: docHref(lang, doc), languages: { ...docAlternates(doc), "x-default": docHref("es", doc) } },
-    openGraph: { url: docHref(lang, doc), title: `${text.title} · ${d.meta.siteName}`, description: text.lead },
+    openGraph: { type: "website", siteName: d.meta.siteName, url: docHref(lang, doc), title, description: text.lead, locale: OG_LOCALE[lang], images: [card] },
+    twitter: { card: "summary_large_image", title, description: text.lead, images: [card.url] },
   };
 }
 

@@ -94,6 +94,9 @@ test.describe("privacy and legal pages", () => {
 
       await page.goto(privacy);
       await expect(page.getByRole("heading", { level: 1 })).toHaveText(d.privacy.title);
+      await expect(page).toHaveTitle(`${d.privacy.title} · ${d.meta.siteName}`);
+      expect(await page.locator('meta[property="og:title"]').getAttribute("content")).toBe(`${d.privacy.title} · ${d.meta.siteName}`);
+      expect(await page.locator('meta[property="og:image"]').first().getAttribute("content")).toMatch(new RegExp(`/${lang}/opengraph-image`));
       for (const host of ["tiles.openfreemap.org", "elevation-tiles-prod", "us-east-1", "zama-demo-v1", "zama-theme", "zama-lang"]) await expect(page.locator("main")).toContainText(host);
       await expect(page.locator("main")).toContainText("Cloudflare");
       await expect(page.locator("main")).toContainText("Vercel");

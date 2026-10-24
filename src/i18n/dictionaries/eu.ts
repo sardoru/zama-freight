@@ -53,7 +53,7 @@ export const eu: Dict = {
     simTitle: "Eduki simulatua",
     sim: "Enpresak, pertsonak, ibilgailuak, matrikulak, prezioak eta eskaintzak asmatuak dira, eta benetako negozio batekin izan dezaketen antzekotasuna nahigabea da. Lekuak, errepideak, portuak eta logistika-guneak benetakoak dira. Arauen laburpenak (emisio baxuko eremua, kabotajea, garraio-dokumentuak) sinplifikatuak dira eta ez dira aholkularitza juridikoa.",
     operatorTitle: "Titularra",
-    operator: "Irabazi-asmorik gabeko prototipo gisa argitaratua. Titularraren identitatea hemen gehituko da edozein abiarazte publiko edo komertzialen aurretik.",
+    operator: "Irabazi-asmorik gabeko prototipo gisa argitaratua. Titularraren identitatea hemen gehituko da edozein abiarazte publiko edo komertzialaren aurretik.",
     operatorPlaceholder: "[Leku-marka: titularraren izena eta posta-helbidea]",
     contactTitle: "Kontaktua",
     contact: "Ireki issue bat proiektuaren GitHub biltegian. Issueak publikoak dira; beraz, ez argitaratu datu pertsonalik.",
