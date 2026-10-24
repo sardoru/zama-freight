@@ -4,15 +4,18 @@
 // rack (blue uprights, orange beams, like real pallet racking), dock doors with
 // the trucks that are at them right now, and the AMR fleet driving the aisles.
 // "Explode" lifts levels and spreads rows apart so the inner bins can be seen.
+// It only draws when something changes (every frame only while robots drive),
+// stops while it is scrolled out of view, and redraws shadows only when
+// something that casts one has moved.
 import { Grid, OrbitControls } from "@react-three/drei";
-import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
-import { useEffect, useMemo, useRef } from "react";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
-import { SKU } from "@/data/warehouses";
+import { countAge, SKU } from "@/data/warehouses";
 import type { Bin, DockAppt, Warehouse } from "@/data/types";
 
-export type ColorMode = "status" | "abc" | "fill" | "temp" | "expiry";
+export type ColorMode = "status" | "abc" | "fill" | "temp" | "expiry" | "count";
 
 export interface TwinProps {
   warehouse: Warehouse;
@@ -30,9 +33,17 @@ export interface TwinProps {
   resetKey: number;
   /** A position to centre on (from the inventory list). */
   focusLoc: string | null;
+  /** Bumped with every request, so the same position can be centred again. */
+  focusKey: number;
   /** Market time, for which doors have a truck at them. */
   now: number;
 }
+
+// Phones and tablets: fewer pixels, no MSAA and a smaller shadow map. The GPU is the
+// bottleneck there, not JS. (This module only loads in the browser.)
+const PHONE = typeof window !== "undefined" && window.matchMedia("(max-width: 767px), (pointer: coarse)").matches;
+// The shadow map is drawn again only when a frame sets needsUpdate (racks, bins or trucks moved).
+const SHADOWS: Partial<THREE.WebGLShadowMap> = { type: THREE.PCFShadowMap, autoUpdate: false };
 
 // Metres.
 const PITCH_X = 1.4;
@@ -41,8 +52,14 @@ const DEPTH = 1.15;
 const AISLE = 3.2;
 const STAGING = 11;
 const BOX = { x: 1.12, y: 1.15, z: 1.0 };
+const FOCUS_OFFSET = new THREE.Vector3(-9, 9, 11);
 
 const rowZ = (r: number) => AISLE + r * DEPTH + Math.floor(r / 2) * AISLE + DEPTH / 2;
+
+// The explode transform. Everything that stands on a level, a row or an aisle (racks,
+// bins, the selection outline, floor zones, robots) goes through these two.
+const explodeY = (level: number, e: number) => level * LEVEL_H * (1 + e * 0.9);
+const explodeZ = (z: number, e: number, cz: number) => cz + (z - cz) * (1 + e * 0.7);
 
 function layout(w: Warehouse) {
   const width = w.bays * PITCH_X;
@@ -50,10 +67,22 @@ function layout(w: Warehouse) {
   const height = w.levels * LEVEL_H + 1.8;
   return { width, depth, height, cz: depth / 2 };
 }
+type Layout = ReturnType<typeof layout>;
 
 function binPosition(b: Pick<Bin, "row" | "bay" | "level">, ex: number, cz: number, out: THREE.Vector3) {
-  const z = rowZ(b.row);
-  return out.set(b.bay * PITCH_X + PITCH_X / 2, 0.16 + b.level * LEVEL_H * (1 + ex * 0.9) + BOX.y / 2, cz + (z - cz) * (1 + ex * 0.7));
+  return out.set(b.bay * PITCH_X + PITCH_X / 2, 0.16 + explodeY(b.level, ex) + BOX.y / 2, explodeZ(rowZ(b.row), ex, cz));
+}
+
+/**
+ * The overview camera. A portrait canvas has a narrower horizontal field of view, so the camera
+ * stands further back there; never beyond the controls' maxDistance, or it could not get there.
+ */
+function overview(L: Layout, aspect: number) {
+  const size = Math.max(L.width + STAGING, L.depth);
+  const target = new THREE.Vector3((L.width - STAGING) / 2 + 2, 2, L.depth / 2);
+  const offset = new THREE.Vector3(-STAGING - size * 0.55, size * 0.62, L.depth + size * 0.55).sub(target);
+  const k = Math.min(Math.max(1, 1.3 / (aspect || 1)), (size * 3 * 0.95) / offset.length());
+  return { target, cam: offset.multiplyScalar(k).add(target) };
 }
 
 const PALETTE = {
@@ -132,6 +161,11 @@ export function binColor(b: Bin, mode: ColorMode, dark: boolean, out: THREE.Colo
       return rampColor(((b.tempC ?? 16) + 24) / 46, out);
     case "expiry":
       return out.set(b.expiryDays === undefined ? (dark ? "#475569" : "#b6bfcb") : b.expiryDays <= 30 ? "#ef4444" : b.expiryDays <= 90 ? "#f59e0b" : "#22c55e");
+    case "count": {
+      // Due, due within the last quarter of its interval, or up to date (muted, so the worklist stands out).
+      const age = countAge(b);
+      return out.set(age >= 1 ? "#ef4444" : age >= 0.75 ? "#f59e0b" : dark ? "#334155" : "#cbd5e1");
+    }
   }
 }
 
@@ -147,13 +181,13 @@ function Racks({ w, ex, dark }: { w: Warehouse; ex: React.RefObject<number>; dar
   const scl = useMemo(() => new THREE.Vector3(), []);
   const q = useMemo(() => new THREE.Quaternion(), []);
 
-  useFrame(() => {
+  useFrame((state) => {
     const e = ex.current ?? 0;
     if (Math.abs(e - last.current) < 1e-4 || !up.current || !beams.current) return;
     last.current = e;
     let i = 0;
     let j = 0;
-    const rackH = (w.levels - 1) * LEVEL_H * (1 + e * 0.9) + LEVEL_H;
+    const rackH = explodeY(w.levels - 1, e) + LEVEL_H;
     for (let r = 0; r < w.rows; r++) {
       const z0 = binPosition({ row: r, bay: 0, level: 0 }, e, L.cz, pos).z;
       for (let b = 0; b <= w.bays; b++) {
@@ -164,7 +198,7 @@ function Racks({ w, ex, dark }: { w: Warehouse; ex: React.RefObject<number>; dar
         }
       }
       for (let l = 0; l < w.levels; l++) {
-        const y = 0.1 + l * LEVEL_H * (1 + e * 0.9);
+        const y = 0.1 + explodeY(l, e);
         for (const side of [-1, 1]) {
           pos.set((w.bays * PITCH_X) / 2, y, z0 + (side * DEPTH) / 2.15);
           scl.set(w.bays * PITCH_X, 0.12, 0.07);
@@ -176,6 +210,7 @@ function Racks({ w, ex, dark }: { w: Warehouse; ex: React.RefObject<number>; dar
     beams.current.instanceMatrix.needsUpdate = true;
     up.current.computeBoundingSphere();
     beams.current.computeBoundingSphere();
+    state.gl.shadowMap.needsUpdate = true;
   });
 
   const p = dark ? PALETTE.dark : PALETTE.light;
@@ -196,6 +231,7 @@ function Racks({ w, ex, dark }: { w: Warehouse; ex: React.RefObject<number>; dar
 function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover }: { w: Warehouse; bins: Bin[]; ex: React.RefObject<number>; mode: ColorMode; dark: boolean; showEmpty: boolean; selected: string | null; onSelect: (loc: string | null) => void; onHover: (b: Bin | null) => void }) {
   const mesh = useRef<THREE.InstancedMesh>(null);
   const sel = useRef<THREE.Mesh>(null);
+  const invalidate = useThree((s) => s.invalidate);
   const L = useMemo(() => layout(w), [w]);
   const shown = useMemo(() => (showEmpty ? bins : bins.filter((b) => b.status !== "empty")), [bins, showEmpty]);
   const last = useRef(-1);
@@ -213,9 +249,12 @@ function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover 
     const c = new THREE.Color();
     shown.forEach((b, i) => im.setColorAt(i, binColor(b, mode, dark, c)));
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
-  }, [shown, mode, dark]);
+    invalidate();
+  }, [shown, mode, dark, invalidate]);
+  // The outline moves to the new selection on the next frame.
+  useEffect(() => invalidate(), [selected, invalidate]);
 
-  useFrame(() => {
+  useFrame((state) => {
     const e = ex.current ?? 0;
     const im = mesh.current;
     if (!im) return;
@@ -229,6 +268,7 @@ function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover 
       im.count = shown.length;
       im.instanceMatrix.needsUpdate = true;
       im.computeBoundingSphere();
+      state.gl.shadowMap.needsUpdate = true;
     }
     const s = selected ? bins.find((b) => b.loc === selected) : undefined;
     if (sel.current) {
@@ -237,7 +277,24 @@ function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover 
     }
   });
 
-  const pick = (e: ThreeEvent<PointerEvent | MouseEvent>) => (e.instanceId !== undefined ? shown[e.instanceId] : undefined);
+  // Stable handlers: R3F compares them by reference, and a new one asks for a frame on every re-render (each market second).
+  const onClick = useCallback(
+    (e: ThreeEvent<MouseEvent>) => {
+      e.stopPropagation();
+      // R3F also clicks at the end of a mouse drag that started on a pallet: that was an orbit, not a pick.
+      if (e.delta > 4) return;
+      onSelect((e.instanceId !== undefined ? shown[e.instanceId] : undefined)?.loc ?? null);
+    },
+    [shown, onSelect],
+  );
+  const onPointerMove = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      e.stopPropagation();
+      onHover((e.instanceId !== undefined ? shown[e.instanceId] : undefined) ?? null);
+    },
+    [shown, onHover],
+  );
+  const onPointerOut = useCallback(() => onHover(null), [onHover]);
   const p = dark ? PALETTE.dark : PALETTE.light;
   return (
     <group>
@@ -247,15 +304,9 @@ function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover 
         args={[undefined, undefined, Math.max(1, shown.length)]}
         castShadow
         receiveShadow
-        onClick={(e) => {
-          e.stopPropagation();
-          onSelect(pick(e)?.loc ?? null);
-        }}
-        onPointerMove={(e) => {
-          e.stopPropagation();
-          onHover(pick(e) ?? null);
-        }}
-        onPointerOut={() => onHover(null)}
+        onClick={onClick}
+        onPointerMove={onPointerMove}
+        onPointerOut={onPointerOut}
       >
         <boxGeometry args={[BOX.x, BOX.y, BOX.z]} />
         <meshStandardMaterial roughness={0.85} metalness={0.02} />
@@ -268,6 +319,35 @@ function Bins({ w, bins, ex, mode, dark, showEmpty, selected, onSelect, onHover 
   );
 }
 
+/** Temperature and customs zones on the floor, under the rows they belong to (they spread with them). */
+function Zones({ w, ex, dark }: { w: Warehouse; ex: React.RefObject<number>; dark: boolean }) {
+  const group = useRef<THREE.Group>(null);
+  const L = useMemo(() => layout(w), [w]);
+  const zones = useMemo(() => w.rowZones.map((z, r) => ({ z, r })).filter((x) => x.z !== "ambient"), [w]);
+  const last = useRef(-1);
+  useFrame(() => {
+    const e = ex.current ?? 0;
+    const g = group.current;
+    if (!g || Math.abs(e - last.current) < 1e-4) return;
+    last.current = e;
+    g.children.forEach((child, i) => {
+      const zone = zones[i];
+      if (zone) child.position.z = explodeZ(rowZ(zone.r), e, L.cz);
+    });
+  });
+  const p = dark ? PALETTE.dark : PALETTE.light;
+  return (
+    <group ref={group}>
+      {zones.map(({ z, r }) => (
+        <mesh key={r} rotation-x={-Math.PI / 2} position={[(w.bays * PITCH_X) / 2, 0.012, rowZ(r)]}>
+          <planeGeometry args={[w.bays * PITCH_X + 0.8, DEPTH + 0.5]} />
+          <meshBasicMaterial color={p.zone[z]} transparent opacity={dark ? 0.28 : 0.22} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function Shell({ w, dark, docks, now }: { w: Warehouse; dark: boolean; docks: DockAppt[]; now: number }) {
   const L = useMemo(() => layout(w), [w]);
   const p = dark ? PALETTE.dark : PALETTE.light;
@@ -275,10 +355,21 @@ function Shell({ w, dark, docks, now }: { w: Warehouse; dark: boolean; docks: Do
     const g = new THREE.BoxGeometry(L.width + STAGING + 2, L.height + 1.5, L.depth);
     return new THREE.EdgesGeometry(g);
   }, [L]);
-  const doorZ = (i: number) => ((i + 0.5) * L.depth) / w.doors;
+  // Doors, trailers and wheels fit the door pitch, so neighbours never overlap on a short wall (Pasaia: 8 doors on 19.7 m).
+  const pitch = L.depth / w.doors;
+  const slab = Math.min(3, pitch - 0.3);
+  const truckW = Math.min(2.5, pitch - 0.15);
+  const doorZ = (i: number) => (i + 0.5) * pitch;
   const busy = new Map<number, DockAppt>();
   for (const a of docks) if (a.warehouseId === w.id && now >= a.start - 10 * 60_000 && now < a.end) busy.set(a.door, a);
-  const zones = w.rowZones.map((z, r) => ({ z, r })).filter((x) => x.z !== "ambient");
+  // Trucks cast shadows: draw the shadow map again when one arrives or leaves.
+  const busyKey = [...busy.keys()].sort((a, b) => a - b).join(",");
+  const shadowKey = useRef<string | null>(null);
+  useFrame((state) => {
+    if (shadowKey.current === busyKey) return;
+    shadowKey.current = busyKey;
+    state.gl.shadowMap.needsUpdate = true;
+  });
   return (
     <group>
       <lineSegments geometry={edges} position={[(L.width - STAGING) / 2, (L.height + 1.5) / 2, L.depth / 2]}>
@@ -289,13 +380,6 @@ function Shell({ w, dark, docks, now }: { w: Warehouse; dark: boolean; docks: Do
         <planeGeometry args={[L.width + STAGING + 2, L.height + 1.5]} />
         <meshStandardMaterial color={p.wall} transparent opacity={dark ? 0.05 : 0.07} side={THREE.DoubleSide} />
       </mesh>
-      {/* temperature / customs zones on the floor */}
-      {zones.map(({ z, r }) => (
-        <mesh key={r} rotation-x={-Math.PI / 2} position={[(w.bays * PITCH_X) / 2, 0.012, rowZ(r)]}>
-          <planeGeometry args={[w.bays * PITCH_X + 0.8, DEPTH + 0.5]} />
-          <meshBasicMaterial color={p.zone[z]} transparent opacity={dark ? 0.28 : 0.22} />
-        </mesh>
-      ))}
       {/* dock doors and the trucks at them */}
       {Array.from({ length: w.doors }, (_, i) => {
         const a = busy.get(i);
@@ -303,22 +387,22 @@ function Shell({ w, dark, docks, now }: { w: Warehouse; dark: boolean; docks: Do
         return (
           <group key={i} position={[-STAGING, 0, z]}>
             <mesh position={[0, 1.8, 0]}>
-              <boxGeometry args={[0.25, 3.6, 3.0]} />
+              <boxGeometry args={[0.25, 3.6, slab]} />
               <meshStandardMaterial color={a ? p.doorBusy : p.door} emissive={a ? p.doorBusy : "#000000"} emissiveIntensity={a ? 0.35 : 0} />
             </mesh>
             {a ? (
               <group position={[-7.6, 0, 0]}>
                 <mesh position={[0, 2.3, 0]} castShadow>
-                  <boxGeometry args={[13.6, 3.2, 2.5]} />
+                  <boxGeometry args={[13.6, 3.2, truckW]} />
                   <meshStandardMaterial color={p.trailer} roughness={0.6} />
                 </mesh>
                 <mesh position={[-8.2, 1.8, 0]} castShadow>
-                  <boxGeometry args={[2.4, 2.9, 2.5]} />
+                  <boxGeometry args={[2.4, 2.9, truckW]} />
                   <meshStandardMaterial color={a.direction === "in" ? p.cab : p.doorBusy} roughness={0.4} metalness={0.2} />
                 </mesh>
                 {[-5.5, -4.2, 4.6, 5.9, -8.4].map((x) => (
                   <mesh key={x} position={[x, 0.5, 0]} rotation-x={Math.PI / 2}>
-                    <cylinderGeometry args={[0.5, 0.5, 2.6, 14]} />
+                    <cylinderGeometry args={[0.5, 0.5, truckW + 0.1, 14]} />
                     <meshStandardMaterial color="#1f2328" roughness={0.9} />
                   </mesh>
                 ))}
@@ -331,8 +415,10 @@ function Shell({ w, dark, docks, now }: { w: Warehouse; dark: boolean; docks: Do
   );
 }
 
-function Robots({ w, dark }: { w: Warehouse; dark: boolean }) {
+function Robots({ w, dark, ex }: { w: Warehouse; dark: boolean; ex: React.RefObject<number> }) {
   const group = useRef<THREE.Group>(null);
+  // Own clock: R3F restarts its clock whenever the frame loop changes (scrolling the twin away and back).
+  const t = useRef(0);
   const L = useMemo(() => layout(w), [w]);
   const pairs = Math.ceil(w.rows / 2);
   const bots = useMemo(
@@ -344,27 +430,30 @@ function Robots({ w, dark }: { w: Warehouse; dark: boolean }) {
       })),
     [w.amr, pairs],
   );
-  useFrame(({ clock }) => {
+  useFrame((_, delta) => {
     const g = group.current;
     if (!g) return;
-    const t = clock.getElapsedTime();
+    t.current += Math.min(delta, 0.1);
+    const e = ex.current ?? 0;
     g.children.forEach((child, i) => {
       const b = bots[i];
       if (!b) return;
       const span = L.width + STAGING - 3;
-      const u = (Math.sin(t * b.speed * 0.25 + b.phase) + 1) / 2;
-      const x = -STAGING + 1.5 + u * span;
-      const z = b.aisle === 0 ? AISLE / 2 : rowZ(b.aisle * 2 - 1) + DEPTH / 2 + AISLE / 2;
-      child.position.set(x, 0.2, Math.min(L.depth - 0.8, z));
-      child.rotation.y = Math.cos(t * b.speed * 0.25 + b.phase) > 0 ? 0 : Math.PI;
+      const a = t.current * b.speed * 0.25 + b.phase;
+      const x = -STAGING + 1.5 + ((Math.sin(a) + 1) / 2) * span;
+      // Aisle 0 runs along the back wall; aisle k between row pairs, so it stays midway when they spread.
+      const z = Math.min(L.depth - 0.8, b.aisle === 0 ? AISLE / 2 : rowZ(b.aisle * 2 - 1) + DEPTH / 2 + AISLE / 2);
+      child.position.set(x, 0.2, explodeZ(z, e, L.cz));
+      child.rotation.y = Math.cos(a) > 0 ? 0 : Math.PI;
     });
   });
   const p = dark ? PALETTE.dark : PALETTE.light;
   return (
     <group ref={group}>
       {bots.map((_, i) => (
+        // No shadows: a 30 cm robot casts none you'd see from up here, and it would redraw the shadow map every frame.
         <group key={i}>
-          <mesh castShadow>
+          <mesh>
             <boxGeometry args={[0.95, 0.32, 0.65]} />
             <meshStandardMaterial color={p.robot} roughness={0.4} metalness={0.3} />
           </mesh>
@@ -379,101 +468,180 @@ function Robots({ w, dark }: { w: Warehouse; dark: boolean }) {
 }
 
 function Explode({ target, valueRef }: { target: number; valueRef: React.RefObject<number> }) {
-  useFrame((_, delta) => {
-    valueRef.current = THREE.MathUtils.damp(valueRef.current ?? 0, target, 7, delta);
-    if (Math.abs(valueRef.current - target) < 1e-3) valueRef.current = target;
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => invalidate(), [target, invalidate]);
+  useFrame((state, delta) => {
+    const v = valueRef.current ?? 0;
+    if (v === target) return;
+    // On demand, delta is the time since the last frame drawn, which can be minutes: clamp it, or the first step jumps.
+    valueRef.current = Math.abs(v - target) < 1e-3 ? target : THREE.MathUtils.damp(v, target, 7, Math.min(delta, 0.1));
+    if (valueRef.current !== target) state.invalidate();
   });
   return null;
 }
 
-function CameraRig({ w, resetKey, focus, controls }: { w: Warehouse; resetKey: number; focus: THREE.Vector3 | null; controls: React.RefObject<OrbitControlsImpl | null> }) {
+function CameraRig({
+  w,
+  bins,
+  explode,
+  resetKey,
+  focusLoc,
+  focusKey,
+  controls,
+}: {
+  w: Warehouse;
+  bins: Bin[];
+  explode: number;
+  resetKey: number;
+  focusLoc: string | null;
+  focusKey: number;
+  controls: React.RefObject<OrbitControlsImpl | null>;
+}) {
   const L = useMemo(() => layout(w), [w]);
-  const goal = useRef<{ target: THREE.Vector3; cam: THREE.Vector3 } | null>(null);
+  const get = useThree((s) => s.get);
+  const invalidate = useThree((s) => s.invalidate);
+  // Where the camera is flying to, and for how many more seconds it tries.
+  const goal = useRef<{ target: THREE.Vector3; cam: THREE.Vector3; left: number } | null>(null);
+  const first = useRef(true);
+
+  // The overview, on mount, on a warehouse change and on "Reset view". The canvas size is read
+  // only then, so a phone's URL bar showing or hiding doesn't fly the camera back.
   useEffect(() => {
-    const size = Math.max(L.width + STAGING, L.depth);
-    goal.current = {
-      target: new THREE.Vector3((L.width - STAGING) / 2 + 2, 2, L.depth / 2),
-      cam: new THREE.Vector3(-STAGING - size * 0.55, size * 0.62, L.depth + size * 0.55),
+    const { size, camera } = get();
+    const o = overview(L, size.width / size.height);
+    const c = controls.current;
+    if (first.current && c) {
+      // The first view starts there instead of flying in from the default camera.
+      first.current = false;
+      camera.position.copy(o.cam);
+      c.target.copy(o.target);
+      c.update();
+    } else goal.current = { ...o, left: 3 };
+    invalidate();
+  }, [L, resetKey, get, invalidate, controls]);
+
+  // Centre on a position, again each time one is asked for (focusKey), even the same one.
+  const flyTo = useEffectEvent((loc: string) => {
+    const b = bins.find((x) => x.loc === loc);
+    if (!b) return;
+    const target = binPosition(b, explode, L.cz, new THREE.Vector3());
+    goal.current = { target, cam: target.clone().add(FOCUS_OFFSET), left: 3 };
+    invalidate();
+  });
+  useEffect(() => {
+    if (focusLoc) flyTo(focusLoc);
+  }, [focusLoc, focusKey]);
+
+  // The user grabs the camera (drag, wheel, pinch): stop flying instead of fighting them.
+  useEffect(() => {
+    const c = controls.current;
+    if (!c) return;
+    const stop = () => {
+      goal.current = null;
     };
-  }, [L, resetKey]);
-  useEffect(() => {
-    if (!focus) return;
-    goal.current = { target: focus.clone(), cam: focus.clone().add(new THREE.Vector3(-9, 9, 11)) };
-  }, [focus]);
+    c.addEventListener("start", stop);
+    return () => c.removeEventListener("start", stop);
+  }, [controls]);
+
   useFrame(({ camera }, delta) => {
     const g = goal.current;
     const c = controls.current;
     if (!g || !c) return;
-    c.target.lerp(g.target, 1 - Math.exp(-delta * 4));
-    camera.position.lerp(g.cam, 1 - Math.exp(-delta * 4));
+    // Clamped like Explode's: the first frame after a pause would otherwise land in one jump.
+    const dt = Math.min(delta, 0.1);
+    const k = 1 - Math.exp(-dt * 4);
+    c.target.lerp(g.target, k);
+    camera.position.lerp(g.cam, k);
     c.update();
-    if (c.target.distanceTo(g.target) < 0.02 && camera.position.distanceTo(g.cam) < 0.05) goal.current = null;
+    g.left -= dt;
+    if (g.left <= 0 || (c.target.distanceTo(g.target) < 0.02 && camera.position.distanceTo(g.cam) < 0.05)) goal.current = null;
+    else invalidate();
   });
   return null;
 }
 
 export default function Twin(props: TwinProps) {
-  const { warehouse: w, dark } = props;
+  const { warehouse: w, dark, onSelect } = props;
+  // Stable for the same reason as the pallet handlers: a new Canvas callback is a store update, and that draws a frame.
+  const onMissed = useCallback(() => onSelect(null), [onSelect]);
   const p = dark ? PALETTE.dark : PALETTE.light;
   const L = useMemo(() => layout(w), [w]);
   const ex = useRef(props.explode);
   const controls = useRef<OrbitControlsImpl | null>(null);
-  const focus = useMemo(() => {
-    const b = props.focusLoc ? props.bins.find((x) => x.loc === props.focusLoc) : undefined;
-    return b ? binPosition(b, props.explode, L.cz, new THREE.Vector3()) : null;
-    // Re-centre only when a new position is asked for.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.focusLoc]);
   const size = Math.max(L.width + STAGING, L.depth);
 
+  // Nothing to draw while the twin is scrolled out of view (phones: the tabs below it).
+  const box = useRef<HTMLDivElement>(null);
+  const [onScreen, setOnScreen] = useState(true);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    // Entries come in order: the last one is where the twin is now.
+    const io = new IntersectionObserver((entries) => setOnScreen(entries[entries.length - 1].isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
   return (
-    <Canvas
-      shadows="percentage"
-      dpr={[1, 2]}
-      camera={{ position: [-STAGING - size * 0.55, size * 0.62, L.depth + size * 0.55], fov: 42, near: 0.5, far: 600 }}
-      gl={{ antialias: true, preserveDrawingBuffer: false }}
-      onPointerMissed={() => props.onSelect(null)}
-    >
-      <color attach="background" args={[dark ? "#0b1118" : "#f1f0eb"]} />
-      <fog attach="fog" args={[dark ? "#0b1118" : "#f1f0eb", size * 1.6, size * 4]} />
-      <hemisphereLight args={[dark ? "#a9c4ff" : "#ffffff", dark ? "#151b22" : "#d9d4c8", dark ? 0.55 : 0.9]} />
-      <ambientLight intensity={dark ? 0.25 : 0.35} />
-      <directionalLight
-        position={[-L.width * 0.4, L.height * 4, L.depth * 1.3]}
-        intensity={dark ? 1.25 : 1.6}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-size}
-        shadow-camera-right={size}
-        shadow-camera-top={size}
-        shadow-camera-bottom={-size}
-        shadow-camera-near={1}
-        shadow-camera-far={size * 6}
-        shadow-bias={-0.0004}
-      />
-      <mesh rotation-x={-Math.PI / 2} position={[(L.width - STAGING) / 2, 0, L.depth / 2]} receiveShadow>
-        <planeGeometry args={[L.width + STAGING + 60, L.depth + 60]} />
-        <meshStandardMaterial color={p.floor} roughness={0.95} />
-      </mesh>
-      <Grid
-        position={[(L.width - STAGING) / 2, 0.01, L.depth / 2]}
-        args={[L.width + STAGING + 40, L.depth + 40]}
-        cellSize={1}
-        cellThickness={0.6}
-        cellColor={p.grid}
-        sectionSize={5}
-        sectionThickness={1}
-        sectionColor={p.section}
-        fadeDistance={size * 3}
-        fadeStrength={1.2}
-      />
-      <Explode target={props.explode} valueRef={ex} />
-      <Shell w={w} dark={dark} docks={props.docks} now={props.now} />
-      <Racks key={`racks-${w.id}`} w={w} ex={ex} dark={dark} />
-      <Bins w={w} bins={props.bins} ex={ex} mode={props.mode} dark={dark} showEmpty={props.showEmpty} selected={props.selected} onSelect={props.onSelect} onHover={props.onHover} />
-      {props.showRobots ? <Robots w={w} dark={dark} /> : null}
-      <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.08} maxPolarAngle={Math.PI / 2.08} minDistance={6} maxDistance={size * 3} target={[(L.width - STAGING) / 2 + 2, 2, L.depth / 2]} />
-      <CameraRig w={w} resetKey={props.resetKey} focus={focus} controls={controls} />
-    </Canvas>
+    <div ref={box} className="size-full">
+      <Canvas
+        shadows={SHADOWS}
+        dpr={PHONE ? [1, 1.5] : [1, 2]}
+        // Robots move every frame; without them a frame is drawn only when something invalidates it.
+        frameloop={!onScreen ? "never" : props.showRobots ? "always" : "demand"}
+        camera={{ position: [-STAGING - size * 0.55, size * 0.62, L.depth + size * 0.55], fov: 42, near: 0.5, far: 600 }}
+        gl={{ antialias: !PHONE, preserveDrawingBuffer: false }}
+        // A restored context comes back blank: nothing else would ask for a frame or for the shadows again.
+        onCreated={({ gl, invalidate }) =>
+          gl.domElement.addEventListener("webglcontextrestored", () => {
+            gl.shadowMap.needsUpdate = true;
+            invalidate();
+          })
+        }
+        onPointerMissed={onMissed}
+      >
+        <color attach="background" args={[dark ? "#0b1118" : "#f1f0eb"]} />
+        <fog attach="fog" args={[dark ? "#0b1118" : "#f1f0eb", size * 1.6, size * 4]} />
+        <hemisphereLight args={[dark ? "#a9c4ff" : "#ffffff", dark ? "#151b22" : "#d9d4c8", dark ? 0.55 : 0.9]} />
+        <ambientLight intensity={dark ? 0.25 : 0.35} />
+        <directionalLight
+          position={[-L.width * 0.4, L.height * 4, L.depth * 1.3]}
+          intensity={dark ? 1.25 : 1.6}
+          castShadow
+          shadow-mapSize={PHONE ? [1024, 1024] : [2048, 2048]}
+          shadow-camera-left={-size}
+          shadow-camera-right={size}
+          shadow-camera-top={size}
+          shadow-camera-bottom={-size}
+          shadow-camera-near={1}
+          shadow-camera-far={size * 6}
+          shadow-bias={-0.0004}
+        />
+        <mesh rotation-x={-Math.PI / 2} position={[(L.width - STAGING) / 2, 0, L.depth / 2]} receiveShadow>
+          <planeGeometry args={[L.width + STAGING + 60, L.depth + 60]} />
+          <meshStandardMaterial color={p.floor} roughness={0.95} />
+        </mesh>
+        <Grid
+          position={[(L.width - STAGING) / 2, 0.01, L.depth / 2]}
+          args={[L.width + STAGING + 40, L.depth + 40]}
+          cellSize={1}
+          cellThickness={0.6}
+          cellColor={p.grid}
+          sectionSize={5}
+          sectionThickness={1}
+          sectionColor={p.section}
+          fadeDistance={size * 3}
+          fadeStrength={1.2}
+        />
+        <Explode target={props.explode} valueRef={ex} />
+        <Shell w={w} dark={dark} docks={props.docks} now={props.now} />
+        <Zones key={`zones-${w.id}`} w={w} ex={ex} dark={dark} />
+        <Racks key={`racks-${w.id}`} w={w} ex={ex} dark={dark} />
+        <Bins w={w} bins={props.bins} ex={ex} mode={props.mode} dark={dark} showEmpty={props.showEmpty} selected={props.selected} onSelect={props.onSelect} onHover={props.onHover} />
+        {props.showRobots ? <Robots w={w} dark={dark} ex={ex} /> : null}
+        <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.08} maxPolarAngle={Math.PI / 2.08} minDistance={6} maxDistance={size * 3} target={[(L.width - STAGING) / 2 + 2, 2, L.depth / 2]} />
+        <CameraRig w={w} bins={props.bins} explode={props.explode} resetKey={props.resetKey} focusLoc={props.focusLoc} focusKey={props.focusKey} controls={controls} />
+      </Canvas>
+    </div>
   );
 }

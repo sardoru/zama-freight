@@ -145,6 +145,11 @@ export const abcOf = (picksPerDay: number): Abc => (picksPerDay >= 16 ? "A" : pi
 
 const ZONE_TEMP: Record<TempZone, [number, number]> = { ambient: [17, 2.2], chilled: [3.1, 0.7], frozen: [-21, 1.3], bonded: [16, 2] };
 
+/** Days between cycle counts for each ABC class. */
+export const COUNT_EVERY: Record<Abc, number> = { A: 30, B: 60, C: 120 };
+// The oldest seeded count per class, half as long again as its interval: every class gets a small overdue tail.
+const COUNT_SEED: Record<Abc, number> = { A: 45, B: 90, C: 180 };
+
 /** Every pallet position of a warehouse with what is in it (deterministic). */
 export function buildBins(w: Warehouse): Bin[] {
   const r = rng(hash(w.id));
@@ -165,6 +170,7 @@ export function buildBins(w: Warehouse): Bin[] {
         }
         const sku = r.pick(fit);
         const picksPerDay = Math.max(0, Math.round(sku.velocity * (0.5 + r.next()) * (level === 0 ? 1.15 : 0.85)));
+        const abc = abcOf(picksPerDay);
         const roll = r.next();
         const status =
           zone === "bonded" && roll < 0.12
@@ -187,10 +193,10 @@ export function buildBins(w: Warehouse): Bin[] {
           qty: Math.max(1, Math.round(sku.perPallet * (0.25 + r.next() * 0.75))),
           lot: `L${26}${pad(r.int(1, 43))}-${r.int(100, 999)}`,
           expiryDays: sku.shelfLifeDays ? r.int(Math.round(sku.shelfLifeDays * 0.04), sku.shelfLifeDays) : undefined,
-          abc: abcOf(picksPerDay),
+          abc,
           picksPerDay,
           // Most positions were counted recently; a tail is overdue.
-          countedDaysAgo: Math.round(r.next() ** 3 * 90),
+          countedDaysAgo: Math.round(r.next() ** 3 * COUNT_SEED[abc]),
           tempC,
         });
       }
@@ -248,10 +254,12 @@ export function occupancy(bins: Bin[]): number {
   return bins.length ? bins.filter((b) => b.status !== "empty").length / bins.length : 0;
 }
 
-/** Bins due for a cycle count: A every 30 days, B every 60, C every 120. */
+/** How far into its count interval a position is: 1 means a count is due today. */
+export const countAge = (b: Pick<Bin, "abc" | "countedDaysAgo">) => (b.abc ? (b.countedDaysAgo ?? 0) / COUNT_EVERY[b.abc] : 0);
+
+/** Bins due for a cycle count: A every 30 days, B every 60, C every 120 ("every 30 days" is due on day 30). */
 export function countDue(bins: Bin[]): Bin[] {
-  const every: Record<Abc, number> = { A: 30, B: 60, C: 120 };
-  return bins.filter((b) => b.status !== "empty" && b.abc && (b.countedDaysAgo ?? 0) > every[b.abc]);
+  return bins.filter((b) => b.status !== "empty" && countAge(b) >= 1);
 }
 
 export type WarehouseCatalog = Record<WarehouseId, Bin[]>;
