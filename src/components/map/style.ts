@@ -146,14 +146,18 @@ function hillshade(p: Palette): LayerSpecification {
   };
 }
 
+/** 3D relief, part of the style so a diffed restyle (theme, language) keeps it. */
+export const TERRAIN = { source: "terrain", exaggeration: 1.45 } as const;
+
 export interface StyleOptions {
   dark: boolean;
   lang: Locale;
   lighting: Lighting;
   buildings: boolean;
+  terrain: boolean;
 }
 
-export function buildStyle({ dark, lang, lighting, buildings }: StyleOptions): StyleSpecification {
+export function buildStyle({ dark, lang, lighting, buildings, terrain }: StyleOptions): StyleSpecification {
   const p = dark ? DARK : LIGHT;
   const name = nameExpr(lang);
   const road = (id: string, classes: string[], color: string, widths: [number, number][], extra: Partial<LayerSpecification> = {}): LayerSpecification =>
@@ -301,6 +305,7 @@ export function buildStyle({ dark, lang, lighting, buildings }: StyleOptions): S
     },
     light: lightSpec(lighting),
     sky: sky(lighting),
+    ...(terrain ? { terrain: TERRAIN } : {}),
     layers,
   } as StyleSpecification;
 }
@@ -308,7 +313,7 @@ export function buildStyle({ dark, lang, lighting, buildings }: StyleOptions): S
 const line = (coords: [number, number][]) => ({ type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } });
 
 /** The schematic corridor drawn from our own outline when vector tiles can't load. Labels come from deck.gl. */
-export function fallbackStyle({ dark, lighting }: Pick<StyleOptions, "dark" | "lighting">): StyleSpecification {
+export function fallbackStyle({ dark, lighting, terrain }: Pick<StyleOptions, "dark" | "lighting" | "terrain">): StyleSpecification {
   const p = dark ? DARK : LIGHT;
   return {
     version: 8,
@@ -322,6 +327,7 @@ export function fallbackStyle({ dark, lighting }: Pick<StyleOptions, "dark" | "l
     },
     light: lightSpec(lighting),
     sky: sky(lighting),
+    ...(terrain ? { terrain: TERRAIN } : {}),
     layers: [
       { id: "background", type: "background", paint: { "background-color": dark ? "#061019" : "#b3d2e0" } },
       { id: "land", type: "fill", source: "land", paint: { "fill-color": dark ? "#141c25" : "#efede6" } },

@@ -49,14 +49,38 @@ export function atMadridTime(day: Date, hours: number, minutes = 0): Date {
 
 export type TimePreset = "live" | "dawn" | "morning" | "noon" | "golden" | "dusk" | "night";
 
-export const TIME_PRESETS: Record<Exclude<TimePreset, "live">, [number, number]> = {
-  dawn: [8, 10],
-  morning: [10, 15],
-  noon: [14, 0],
-  golden: [18, 5],
-  dusk: [18, 55],
-  night: [22, 30],
+/**
+ * Each preset is a sun altitude (°) on the rising or the setting side of the day, so "dawn"
+ * is dawn in June and in December alike (fixed clock times drift by hours over the year).
+ */
+const PRESET_SUN: Record<Exclude<TimePreset, "live">, { alt: number; rising: boolean } | "transit"> = {
+  dawn: { alt: 2, rising: true },
+  morning: { alt: 22, rising: true },
+  noon: "transit",
+  golden: { alt: 7, rising: false },
+  dusk: { alt: -2, rising: false },
+  night: { alt: -14, rising: false },
 };
+
+/** The instant on `day`'s Madrid date when the sun over (lat, lng) is where `preset` puts it. */
+export function presetInstant(day: Date, preset: Exclude<TimePreset, "live">, lat: number, lng: number): Date {
+  const alt = (t: number) => solarPosition(new Date(t), lat, lng).altitude;
+  const start = atMadridTime(day, 0).getTime();
+  let noon = start;
+  for (let t = start; t < start + 86_400_000; t += 300_000) if (alt(t) > alt(noon)) noon = t;
+  const spec = PRESET_SUN[preset];
+  if (spec === "transit") return new Date(noon);
+  const target = Math.min(spec.alt, alt(noon) - 1); // a winter noon can be lower than "morning"
+  // Bisect between solar midnight and noon (rising) or noon and the next solar midnight (setting).
+  let lo = spec.rising ? noon - 43_200_000 : noon;
+  let hi = spec.rising ? noon : noon + 43_200_000;
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if (spec.rising === alt(mid) > target) hi = mid;
+    else lo = mid;
+  }
+  return new Date((lo + hi) / 2);
+}
 
 export interface Lighting {
   sun: SunPosition;

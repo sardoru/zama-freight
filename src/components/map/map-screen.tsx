@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useMemo, useState, type ReactNode } from "react";
 import { useIsDark } from "@/components/theme";
 import { Button, Chip, EcoBadge, Progress, Sheet, Spinner, StatusChip, Switch } from "@/components/ui";
@@ -32,8 +33,9 @@ import { driveMs, fitsReturn } from "@/data/seed";
 import type { WarehouseId } from "@/data/types";
 import { buildBins, occupancy, WAREHOUSE, WAREHOUSES } from "@/data/warehouses";
 import { useI18n } from "@/i18n/client";
+import { hasDgtLabel } from "@/lib/checks";
 import type { SunPosition, TimePreset } from "@/lib/sun";
-import { cn } from "@/lib/utils";
+import { cn, fill } from "@/lib/utils";
 import { useMarket, type MapLayers } from "@/store/market";
 import { useSimNow } from "@/store/use-sim-now";
 import { Feed } from "@/components/feed";
@@ -60,13 +62,21 @@ export function MapScreen() {
   const settings = useMarket((s) => s.settings);
   const loads = useMarket((s) => s.loads);
   const returns = useMarket((s) => s.returns);
-  const [selection, setSelection] = useState<Selection>(null);
+  // "Show on map" links here with ?focus=<load id>; useSearchParams already holds the new URL
+  // during a client-side navigation (window.location doesn't yet).
+  const params = useSearchParams();
+  const [linked] = useState(() => {
+    const id = params.get("focus");
+    return id && useMarket.getState().loads.some((l) => l.id === id) ? id : null;
+  });
+  const [selection, setSelection] = useState<Selection>(linked ? { kind: "load", id: linked } : null);
   const [status, setStatus] = useState<MapStatus>("loading");
   const [sun, setSun] = useState<SunPosition | null>(null);
   const [flyTo, setFlyTo] = useState<{ view: ViewId; n: number } | null>(null);
-  const [focus, setFocus] = useState<{ loadId: string; n: number } | null>(null);
+  const [focus, setFocus] = useState<{ loadId: string; n: number } | null>(linked ? { loadId: linked, n: 1 } : null);
   const [sheet, setSheet] = useState<"none" | "settings" | "feed">("none");
   const [panel, setPanel] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
+  const [mapKey, setMapKey] = useState(0);
 
   const kpi = useMemo(() => {
     // What the market has booked: every agreed price on a load that wasn't cancelled.
@@ -92,10 +102,10 @@ export function MapScreen() {
     }
     if (sel.kind === "return") {
       const r = s.returns.find((x) => x.id === sel.id);
-      return r ? `${CARRIER.get(r.carrierId)?.name} · ${place(r.from)} → ${place(r.to)} · −${Math.round(r.discount * 100)} %` : null;
+      return r ? `${CARRIER.get(r.carrierId)?.name} · ${place(r.from)} → ${place(r.to)} · ${fill(d.map.discount, { pct: Math.round(r.discount * 100) })}` : null;
     }
     const w = WAREHOUSE.get(sel.id as WarehouseId);
-    return w ? `${w.name} · ${Math.round((FILL.get(w.id) ?? 0) * 100)} %` : null;
+    return w ? `${w.name} · ${f.pct(FILL.get(w.id) ?? 0)}` : null;
   };
 
   const select = (s: Selection) => setSelection(s);
@@ -123,6 +133,7 @@ export function MapScreen() {
         <div className="grid h-full place-items-center p-6 text-center text-sm text-ink-2">{d.map.noWebgl}</div>
       ) : (
         <CorridorMap
+          key={mapKey}
           dark={dark}
           lang={lang}
           settings={settings}
@@ -133,14 +144,18 @@ export function MapScreen() {
           onStatus={setStatus}
           onSun={setSun}
           tooltip={tooltip}
+          onRestart={() => {
+            setStatus("loading");
+            setMapKey((k) => k + 1);
+          }}
         />
       )}
 
       {status === "loading" ? <Spinner label={d.map.loadingMap} className="pointer-events-none absolute inset-0" /> : null}
 
-      {/* KPIs */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 p-2 md:p-3 md:pr-[22rem] lg:pr-[24rem]">
-        <div className="pointer-events-auto flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
+      {/* KPIs, then the settings panel under them: it follows the chips however many rows they wrap to */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 bottom-3 flex flex-col items-start p-2 md:bottom-10 md:p-3 md:pr-[22rem] lg:bottom-28 lg:pr-[24rem]">
+        <div className="pointer-events-auto flex gap-1.5 self-stretch overflow-x-auto pb-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
           {kpis.map((k) => (
             <div key={k.label} className="glass flex shrink-0 items-center gap-2 rounded-xl border border-line px-2.5 py-1.5 shadow-card">
               <k.icon className={cn("size-4 shrink-0", k.tone)} aria-hidden />
@@ -152,37 +167,39 @@ export function MapScreen() {
           ))}
         </div>
         {status === "fallback" ? (
-          <div className="pointer-events-auto mt-1.5 inline-flex max-w-full items-center gap-2 rounded-lg border border-line bg-warn-soft px-2.5 py-1 text-xs font-medium text-warn">
+          <div className="pointer-events-auto mt-1.5 inline-flex max-w-[calc(100%-3.5rem)] items-center gap-2 rounded-lg border border-line bg-warn-soft px-2.5 py-1 text-xs font-medium text-warn md:max-w-full">
             <Layers className="size-3.5 shrink-0" aria-hidden />
             <span className="truncate">{d.map.fallback}</span>
           </div>
         ) : null}
-      </div>
 
-      {/* Settings (desktop): open on wide screens, a button otherwise */}
-      {panel ? (
-        <aside className="glass absolute top-[5.4rem] left-3 hidden max-h-[calc(100%-11rem)] w-64 overflow-y-auto rounded-2xl border border-line p-2 shadow-card scrollbar-thin md:block">
+        {/* Settings (desktop): open on wide screens, a button otherwise */}
+        {panel ? (
+          <aside className="glass pointer-events-auto mt-2 hidden min-h-0 w-64 overflow-y-auto rounded-2xl border border-line p-2 shadow-card scrollbar-thin md:block">
+            <button
+              type="button"
+              onClick={() => setPanel(false)}
+              aria-expanded
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-[0.72rem] font-bold tracking-wide text-ink-3 uppercase transition hover:text-ink"
+            >
+              <Layers className="size-3.5" aria-hidden />
+              <span className="flex-1 text-left">{d.map.panel}</span>
+              <ChevronLeft className="size-4" aria-hidden />
+            </button>
+            <MapSettings sun={sun} onFly={fly} />
+          </aside>
+        ) : (
           <button
             type="button"
-            onClick={() => setPanel(false)}
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-[0.72rem] font-bold tracking-wide text-ink-3 uppercase transition hover:text-ink"
+            onClick={() => setPanel(true)}
+            aria-expanded={false}
+            className="glass pointer-events-auto mt-2 hidden h-10 shrink-0 items-center gap-2 rounded-xl border border-line px-3 text-sm font-semibold text-ink shadow-card md:inline-flex"
           >
-            <Layers className="size-3.5" aria-hidden />
-            <span className="flex-1 text-left">{d.map.panel}</span>
-            <ChevronLeft className="size-4" aria-hidden />
+            <Layers className="size-4" aria-hidden />
+            {d.map.panel}
           </button>
-          <MapSettings sun={sun} onFly={fly} />
-        </aside>
-      ) : (
-        <button
-          type="button"
-          onClick={() => setPanel(true)}
-          className="glass absolute top-[5.4rem] left-3 hidden h-10 items-center gap-2 rounded-xl border border-line px-3 text-sm font-semibold text-ink shadow-card md:inline-flex"
-        >
-          <Layers className="size-4" aria-hidden />
-          {d.map.panel}
-        </button>
-      )}
+        )}
+      </div>
 
       {/* Live feed (desktop) */}
       <aside className="glass absolute top-3 right-3 hidden max-h-[42%] w-[20rem] flex-col overflow-hidden rounded-2xl border border-line shadow-card md:flex lg:w-[22rem]">
@@ -199,6 +216,7 @@ export function MapScreen() {
       {/* Legend (desktop) */}
       <div className="glass absolute bottom-3 left-3 hidden rounded-xl border border-line px-3 py-2 shadow-card lg:block">
         <Legend />
+        <p className="mt-1.5 border-t border-line pt-1.5 text-[0.65rem] text-ink-3">{d.map.hint}</p>
       </div>
 
       {/* Phone buttons */}
@@ -213,11 +231,11 @@ export function MapScreen() {
       </div>
 
       {selection ? (
-        <div className="absolute inset-x-2 bottom-2 z-10 md:inset-x-auto md:right-14 md:bottom-3 md:w-[23rem]">
+        <div className="absolute inset-x-2 bottom-2 z-10 md:inset-x-auto md:right-14 md:bottom-10 md:w-[23rem]">
           <SelectionCard sel={selection} onClose={() => setSelection(null)} onFocus={focusLoad} />
         </div>
       ) : (
-        <p className="pointer-events-none absolute bottom-3 left-1/2 hidden -translate-x-1/2 rounded-full bg-black/40 px-3 py-1 text-[0.7rem] text-white backdrop-blur md:block lg:hidden xl:block">
+        <p className="pointer-events-none absolute bottom-3 left-3 hidden max-w-[calc(100%-8rem)] rounded-full bg-black/60 px-3 py-1 text-[0.7rem] text-white backdrop-blur md:block lg:hidden">
           {d.map.hint}
         </p>
       )}
@@ -360,7 +378,7 @@ function SelectionCard({ sel, onClose, onFocus }: { sel: NonNullable<Selection>;
         ) : null}
         {v ? (
           <div className="mt-3 flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2 text-xs">
-            <EcoBadge label={v.eco} />
+            {hasDgtLabel(v) ? <EcoBadge label={v.eco} /> : null}
             <span className="font-mono font-semibold text-ink">{v.plate}</span>
             <span className="truncate text-ink-3">
               {drv?.name} · {CARRIER.get(v.carrierId)?.name}
@@ -382,7 +400,7 @@ function SelectionCard({ sel, onClose, onFocus }: { sel: NonNullable<Selection>;
             {d.map.openBoard}
             <ArrowRight className="size-4" aria-hidden />
           </Link>
-          <Button size="md" variant="secondary" onClick={() => onFocus(l.id)} aria-label="Focus" className="h-9">
+          <Button size="md" variant="secondary" onClick={() => onFocus(l.id)} aria-label={d.map.focus} title={d.map.focus} className="h-9">
             <Crosshair className="size-4" aria-hidden />
           </Button>
         </div>
@@ -402,7 +420,7 @@ function SelectionCard({ sel, onClose, onFocus }: { sel: NonNullable<Selection>;
           {v ? <span>{d.vehiclesShort[v.type]} · {v.plate}</span> : null}
         </div>
         <p className="mt-2 text-xs font-semibold text-lime">{fits ? n(d.fleet.fits, fits) : d.fleet.noFits}</p>
-        <Link href={`/${lang}/app/fleet`} className="mt-3 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-xl bg-lime px-3 text-sm font-semibold text-[#0f1a02] transition hover:brightness-110">
+        <Link href={`/${lang}/app/fleet`} className="mt-3 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-xl bg-lime px-3 text-sm font-semibold text-lime-ink transition hover:brightness-110">
           {d.nav.fleet}
           <ArrowRight className="size-4" aria-hidden />
         </Link>
@@ -422,7 +440,7 @@ function SelectionCard({ sel, onClose, onFocus }: { sel: NonNullable<Selection>;
           <span>{d.wh.robots.replace("{{n}}", String(w.amr))}</span>
           <span>{w.hours}</span>
         </div>
-        <Link href={`/${lang}/app/warehouse?w=${w.id}`} className="mt-3 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-xl bg-violet px-3 text-sm font-semibold text-white transition hover:brightness-110">
+        <Link href={`/${lang}/app/warehouse?w=${w.id}`} className="mt-3 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-xl bg-violet px-3 text-sm font-semibold text-white transition hover:brightness-110 dark:text-[#0b1118]">
           {d.map.openTwin}
           <ArrowRight className="size-4" aria-hidden />
         </Link>
@@ -441,7 +459,7 @@ function Header({ kicker, title, chip, onClose }: { kicker: string; title: strin
         <div className="truncate text-[0.95rem] font-bold text-ink">{title}</div>
       </div>
       {chip}
-      <button type="button" onClick={onClose} aria-label={d.common.close} className="-mt-1 -mr-1 rounded-lg p-1.5 text-ink-3 transition hover:bg-surface-2 hover:text-ink">
+      <button type="button" onClick={onClose} aria-label={d.common.close} className="-mt-2 -mr-2 rounded-lg p-3 text-ink-3 transition hover:bg-surface-2 hover:text-ink">
         <X className="size-4" aria-hidden />
       </button>
     </div>

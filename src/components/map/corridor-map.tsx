@@ -10,7 +10,7 @@ import type { PickingInfo } from "@deck.gl/core";
 import { TripsLayer } from "@deck.gl/geo-layers";
 import { ArcLayer, ColumnLayer, PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 import { MapLibreOverlay } from "@deck.gl/maplibre";
-import { AttributionControl, Map as MLMap, NavigationControl, setWorkerUrl, type LngLatBoundsLike } from "maplibre-gl";
+import { AttributionControl, Map as MLMap, NavigationControl, setWorkerUrl, type LngLatBoundsLike, type LngLatLike } from "maplibre-gl";
 import { useEffect, useRef } from "react";
 import { VEHICLE } from "@/data/companies";
 import { networkLines, route } from "@/data/network";
@@ -19,10 +19,11 @@ import { driveMs } from "@/data/seed";
 import type { Load, ReturnTrip, Warehouse } from "@/data/types";
 import { buildBins, occupancy, WAREHOUSES } from "@/data/warehouses";
 import type { Locale } from "@/i18n/config";
+import { makeFmt } from "@/lib/format";
 import { along, bbox, type LngLat } from "@/lib/geo";
-import { atMadridTime, lightingFor, solarPosition, TIME_PRESETS, type Lighting, type SunPosition, type TimePreset } from "@/lib/sun";
+import { lightingFor, presetInstant, solarPosition, type Lighting, type SunPosition, type TimePreset } from "@/lib/sun";
 import { simNow, useMarket, type Settings } from "@/store/market";
-import { buildStyle, fallbackStyle, lightSpec, skySpec } from "./style";
+import { buildStyle, fallbackStyle, lightSpec, skySpec, TERRAIN } from "./style";
 
 export type Selection = { kind: "load" | "return" | "warehouse"; id: string } | null;
 export type MapStatus = "loading" | "ready" | "fallback" | "nowebgl";
@@ -39,6 +40,8 @@ export interface CorridorMapProps {
   onSelect: (s: Selection) => void;
   onStatus: (s: MapStatus) => void;
   onSun: (s: SunPosition) => void;
+  /** The WebGL context was lost and restored: remount the map on a fresh canvas. */
+  onRestart: () => void;
   /** Names for tooltips, already in the reader's language. */
   tooltip: (info: Selection) => string | null;
 }
@@ -89,7 +92,10 @@ const withAlpha = (c: RGB, a: number): RGBA => [c[0], c[1], c[2], a];
 
 function webgl2(): boolean {
   try {
-    return !!document.createElement("canvas").getContext("webgl2");
+    const gl = document.createElement("canvas").getContext("webgl2");
+    // Hand the probe's context back: browsers cap how many can be alive at once.
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    return !!gl;
   } catch {
     return false;
   }
@@ -97,7 +103,7 @@ function webgl2(): boolean {
 
 /** Light and sky for a time preset (or the market clock when "live"). */
 export function lightingAt(time: TimePreset, simMs: number, dark: boolean): Lighting {
-  const date = time === "live" ? new Date(simMs) : atMadridTime(new Date(simMs), ...TIME_PRESETS[time]);
+  const date = time === "live" ? new Date(simMs) : presetInstant(new Date(simMs), time, CENTER[1], CENTER[0]);
   return lightingFor(solarPosition(date, CENTER[1], CENTER[0]), dark);
 }
 
@@ -120,6 +126,62 @@ interface Derived {
 }
 
 const network = networkLines();
+
+/** Every place on the map, for framing "the whole corridor". */
+const CORRIDOR_POINTS = PLACE_IDS.map((id) => PLACES[id].lnglat);
+
+type Camera = { center: LngLatLike; zoom: number; bearing: number; pitch: number };
+
+/**
+ * Which floating panels are on screen. They follow the window's width (Tailwind's md, lg and xl), not the map's: the
+ * side navigation takes 72 px from md and 224 px from xl.
+ */
+function layout(): "phone" | "tablet" | "laptop" | "desktop" {
+  const vw = window.innerWidth;
+  return vw < 768 ? "phone" : vw < 1024 ? "tablet" : vw < 1280 ? "laptop" : "desktop";
+}
+
+/**
+ * The whole corridor, framed for this container: every place inside the part of the screen the floating panels leave
+ * free. When that part is taller than wide (phones, tablets, a desktop between its two side panels) the map turns so
+ * the corridor (it heads about 58° east of north) runs up the screen instead of lying across it as a thin strip. The
+ * fit is measured on the camera itself, so the pitch's perspective counts (cameraForBounds fits the bounding box seen
+ * from straight above).
+ */
+function corridorCamera(m: MLMap): Camera {
+  const v = VIEWS.corridor;
+  const { clientWidth: w, clientHeight: h } = m.getContainer();
+  // The free rectangle, in map pixels. Phones: KPI chips on top, buttons on the right, map controls bottom right.
+  // Tablets: the chips wrap to two rows and the live feed sits top right. Laptops add the legend bottom left;
+  // desktops open the settings panel on the left.
+  const box = {
+    phone: { l: 28, r: w - 64, t: 120, b: h - 70 },
+    tablet: { l: 30, r: w - 350, t: 170, b: h - 50 },
+    laptop: { l: 30, r: w - 410, t: 170, b: h - 110 },
+    desktop: { l: 314, r: w - 410, t: 100, b: h - 60 },
+  }[layout()];
+  const upright = box.b - box.t > (box.r - box.l) * 1.1;
+  const bearing = upright ? 55 : v[4];
+  const pitch = upright ? 45 : v[3];
+  let cam: Camera = { center: [v[0], v[1]], zoom: v[2] - (w < 640 ? 0.9 : 0), bearing, pitch };
+  if (box.r - box.l < 80 || box.b - box.t < 80) return cam;
+  const was: Camera = { center: m.getCenter(), zoom: m.getZoom(), bearing: m.getBearing(), pitch: m.getPitch() };
+  // Measure, move the places' middle onto the rectangle's, rescale, again: a few rounds settle the perspective. The
+  // jumps all happen before the next frame, and the camera goes back to where it was.
+  for (let i = 0; i < 5; i++) {
+    m.jumpTo(cam);
+    const pts = CORRIDOR_POINTS.map((p) => m.project(p));
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const k = Math.min((box.r - box.l) / Math.max(1, x1 - x0), (box.b - box.t) / Math.max(1, y1 - y0));
+    const c = m.project(m.getCenter());
+    const center = m.unproject([c.x + (x0 + x1 - box.l - box.r) / 2, c.y + (y0 + y1 - box.t - box.b) / 2]);
+    cam = { center, zoom: m.getZoom() + Math.log2(k), bearing, pitch };
+  }
+  m.jumpTo(was);
+  return cam;
+}
 const fill = new Map(WAREHOUSES.map((w) => [w.id, occupancy(buildBins(w))]));
 
 export default function CorridorMap(props: CorridorMapProps) {
@@ -152,32 +214,42 @@ export default function CorridorMap(props: CorridorMapProps) {
     t0.current = simNow(useMarket.getState().clock);
 
     const p = live.current;
-    const narrow = container.clientWidth < 640;
-    const wide = container.clientWidth >= 1024;
     const v = VIEWS.corridor;
     const lighting = lightingAt(p.settings.time, t0.current, p.dark);
-    const m = new MLMap({
-      container,
-      style: buildStyle({ dark: p.dark, lang: p.lang, lighting, buildings: p.settings.layers.buildings }),
-      center: [v[0], v[1]],
-      zoom: v[2] - (narrow ? 0.9 : wide ? 0.45 : 0),
-      pitch: v[3],
-      bearing: v[4],
-      minZoom: 7.5,
-      maxZoom: 18.5,
-      maxPitch: 78,
-      maxBounds: [
-        [-3.4, 42.6],
-        [-0.2, 44.3],
-      ],
-      attributionControl: false,
-      canvasContextAttributes: { antialias: true },
-      fadeDuration: 150,
-    });
+    let m: MLMap;
+    try {
+      m = new MLMap({
+        container,
+        style: buildStyle({ dark: p.dark, lang: p.lang, lighting, buildings: p.settings.layers.buildings, terrain: p.settings.terrain }),
+        // Framed for this screen by corridorCamera() right below.
+        center: [v[0], v[1]],
+        zoom: v[2],
+        pitch: v[3],
+        bearing: v[4],
+        minZoom: 7.5,
+        maxZoom: 18.5,
+        maxPitch: 78,
+        maxBounds: [
+          [-3.4, 42.6],
+          [-0.2, 44.3],
+        ],
+        attributionControl: false,
+        canvasContextAttributes: { antialias: true },
+        fadeDuration: 150,
+      });
+    } catch (err) {
+      // The probe got a WebGL2 context but MapLibre couldn't get one with the attributes it needs.
+      console.warn("map:", err);
+      live.current.onStatus("nowebgl");
+      return;
+    }
     map.current = m;
     styled.current = { dark: p.dark, lang: p.lang };
-    // Keep the corridor clear of the floating panels on wide screens (settings left, feed right).
-    if (wide) m.setPadding({ left: 260, right: 330, top: 60, bottom: 0 });
+    // Keep the views clear of the floating panels on wide screens: the feed on the right, and on desktops the settings
+    // panel, open by default, on the left.
+    const screen = layout();
+    if (screen === "laptop" || screen === "desktop") m.setPadding({ left: screen === "desktop" ? 284 : 0, right: 380, top: 60, bottom: 0 });
+    m.jumpTo(corridorCamera(m));
     m.addControl(new AttributionControl({ compact: true }), "bottom-right");
     m.addControl(new NavigationControl({ visualizePitch: true }), "bottom-right");
     p.onSun(lighting.sun);
@@ -185,6 +257,8 @@ export default function CorridorMap(props: CorridorMapProps) {
     const ov = new MapLibreOverlay({
       interleaved: true,
       layers: [],
+      // Trucks move 15-100 px/s at street zoom; give the pointer some slack.
+      pickingRadius: 8,
       onClick: (info: PickingInfo) => live.current.onSelect(pick(info)),
       onHover: (info: PickingInfo) => {
         m.getCanvas().style.cursor = info.object ? "pointer" : "";
@@ -215,27 +289,52 @@ export default function CorridorMap(props: CorridorMapProps) {
 
     // If the vector tiles can't be reached, switch to the schematic corridor.
     let gotTiles = false;
+    let tileErrors = 0;
     const toFallback = () => {
       if (mode.current === "fallback" || !map.current) return;
       mode.current = "fallback";
       styleReady.current = false;
       const q = live.current;
-      m.setStyle(fallbackStyle({ dark: q.dark, lighting: lightingAt(q.settings.time, simNow(useMarket.getState().clock), q.dark) }), { diff: false });
+      const l = lightingAt(q.settings.time, simNow(useMarket.getState().clock), q.dark);
+      m.setStyle(fallbackStyle({ dark: q.dark, lighting: l, terrain: q.settings.terrain }), { diff: false });
       q.onStatus("fallback");
     };
     m.on("sourcedata", (e) => {
       if (e.sourceId === "omt" && e.tile) gotTiles = true;
     });
     m.on("error", (e) => {
+      const { sourceId, tile } = e as { sourceId?: string; tile?: unknown };
       const err = e.error as (Error & { url?: string }) | undefined;
-      const fromOmt = (e as { sourceId?: string }).sourceId === "omt" || /openfreemap/.test(`${err?.url ?? ""} ${err?.message ?? ""}`);
-      // Once tiles have arrived, a stray failed tile is just a gap, not a reason to give up the basemap.
-      if (mode.current === "vector" && fromOmt && !gotTiles) toFallback();
-      else if (!fromOmt) console.warn("map:", err?.message ?? e);
+      const fromOmt = sourceId === "omt" || /openfreemap/.test(`${err?.url ?? ""} ${err?.message ?? ""}`);
+      if (!fromOmt) return console.warn("map:", err?.message ?? e);
+      if (mode.current !== "vector" || gotTiles) return;
+      // Give up on the basemap when its TileJSON fails (no tile attached) or the first tiles all
+      // fail; one failed tile (a 503, a network blip on a phone) is just a gap.
+      if (!tile || ++tileErrors >= 6) toFallback();
     });
-    const watchdog = setTimeout(() => {
-      if (!gotTiles) toFallback();
-    }, 12_000);
+    const arm = () =>
+      setTimeout(() => {
+        if (!gotTiles) toFallback();
+      }, 25_000);
+    let watchdog = arm();
+    // Back online after a fallback: try the real basemap again.
+    const retry = () => {
+      if (mode.current !== "fallback" || !map.current) return;
+      mode.current = "vector";
+      gotTiles = false;
+      tileErrors = 0;
+      styleReady.current = false;
+      clearTimeout(watchdog);
+      watchdog = arm();
+      const q = live.current;
+      const l = lightingAt(q.settings.time, simNow(useMarket.getState().clock), q.dark);
+      m.setStyle(buildStyle({ dark: q.dark, lang: q.lang, lighting: l, buildings: q.settings.layers.buildings, terrain: q.settings.terrain }), { diff: false });
+      q.onStatus("loading");
+    };
+    window.addEventListener("online", retry);
+    // deck.gl can't follow MapLibre through a lost WebGL context (its buffers and programs die with
+    // it and luma keeps stale state on the context object): start again on a fresh canvas.
+    m.on("webglcontextrestored", () => live.current.onRestart());
 
     m.on("style.load", () => {
       styleReady.current = true;
@@ -262,6 +361,7 @@ export default function CorridorMap(props: CorridorMapProps) {
     return () => {
       cancelAnimationFrame(raf);
       clearTimeout(watchdog);
+      window.removeEventListener("online", retry);
       overlay.current = null;
       map.current = null;
       try {
@@ -281,7 +381,8 @@ export default function CorridorMap(props: CorridorMapProps) {
     if (!m || !styleReady.current) return;
     const { settings, dark } = live.current;
     try {
-      m.setTerrain(settings.terrain ? { source: "terrain", exaggeration: 1.45 } : null);
+      // setTerrain rebuilds the terrain (meshes, render targets) every call: only call it on a change.
+      if (settings.terrain !== !!m.getTerrain()) m.setTerrain(settings.terrain ? TERRAIN : null);
       if (m.getLayer("buildings-3d")) m.setLayoutProperty("buildings-3d", "visibility", settings.layers.buildings ? "visible" : "none");
       const l = lightingAt(settings.time, simNow(useMarket.getState().clock), dark);
       m.setLight(lightSpec(l));
@@ -300,8 +401,8 @@ export default function CorridorMap(props: CorridorMapProps) {
     const l = lightingAt(props.settings.time, simNow(useMarket.getState().clock), props.dark);
     const style =
       mode.current === "fallback"
-        ? fallbackStyle({ dark: props.dark, lighting: l })
-        : buildStyle({ dark: props.dark, lang: props.lang, lighting: l, buildings: props.settings.layers.buildings });
+        ? fallbackStyle({ dark: props.dark, lighting: l, terrain: props.settings.terrain })
+        : buildStyle({ dark: props.dark, lang: props.lang, lighting: l, buildings: props.settings.layers.buildings, terrain: props.settings.terrain });
     m.setStyle(style);
     // style.load doesn't fire for a diffed update: apply right away too.
     applySettings();
@@ -324,7 +425,9 @@ export default function CorridorMap(props: CorridorMapProps) {
     if (!m || !props.flyTo) return;
     const v = VIEWS[props.flyTo.view];
     const w = m.getContainer().clientWidth;
-    m.flyTo({ center: [v[0], v[1]], zoom: v[2] - (w < 640 ? 0.8 : w >= 1024 ? 0.45 : 0), pitch: v[3], bearing: v[4], duration: 2400, essential: true });
+    const cam: Camera =
+      props.flyTo.view === "corridor" ? corridorCamera(m) : { center: [v[0], v[1]], zoom: v[2] - (w < 640 ? 0.8 : w >= 1024 ? 0.45 : 0), pitch: v[3], bearing: v[4] };
+    m.flyTo({ ...cam, duration: 2400, essential: true });
   }, [props.flyTo]);
 
   useEffect(() => {
@@ -339,10 +442,15 @@ export default function CorridorMap(props: CorridorMapProps) {
       m.flyTo({ center: point, zoom: 13.4, pitch: 62, bearing: heading - 20, duration: 2200, essential: true });
     } else {
       const b = bbox(r.path);
-      const narrow = m.getContainer().clientWidth < 640;
       m.fitBounds([b[0], b[1], b[2], b[3]] as LngLatBoundsLike, {
-        // On wide screens the camera padding already clears the side panels.
-        padding: narrow ? { top: 90, bottom: 190, left: 30, right: 30 } : { top: 70, bottom: 90, left: 50, right: 50 },
+        // Clear of the chips and the load's card (at the bottom on phones, bottom right on tablets, under the feed
+        // further up); on wider screens the camera padding already clears the side panels.
+        padding: {
+          phone: { top: 130, bottom: 280, left: 30, right: 64 },
+          tablet: { top: 180, bottom: 60, left: 40, right: 400 },
+          laptop: { top: 70, bottom: 110, left: 50, right: 50 },
+          desktop: { top: 70, bottom: 90, left: 50, right: 50 },
+        }[layout()],
         pitch: 50,
         duration: 2000,
         maxZoom: 13.5,
@@ -355,7 +463,7 @@ export default function CorridorMap(props: CorridorMapProps) {
     const o = info.object as { load?: Load; id?: string } | undefined;
     if (!o || !info.layer) return null;
     const id = info.layer.id;
-    if (id === "trucks" || id === "trails") return { kind: "load", id: (o as Truck).load.id };
+    if (id === "trucks" || id === "truck-halo" || id === "trails") return { kind: "load", id: (o as Truck).load.id };
     if (id === "lanes") return { kind: "load", id: (o as Load).id };
     if (id === "returns") return { kind: "return", id: (o as ReturnTrip).id };
     if (id === "warehouses") return { kind: "warehouse", id: (o as Warehouse).id };
@@ -418,6 +526,7 @@ export default function CorridorMap(props: CorridorMapProps) {
           capRounded: true,
           jointRounded: true,
           parameters: { depthCompare: "always", depthWriteEnabled: false },
+          updateTriggers: { getColor: [dark, fallback] },
         }),
       );
     }
@@ -538,6 +647,8 @@ export default function CorridorMap(props: CorridorMapProps) {
           getFillColor: (t) => withAlpha(t.electric ? c.electric : c.truck, Math.round(50 + 50 * pulse)),
           getRadius: 11 + 5 * pulse,
           radiusUnits: "pixels",
+          // The halo is the bigger target: moving trucks are hard to hit on the 6 px dot alone.
+          pickable: true,
           parameters: { depthCompare: "always", depthWriteEnabled: false },
           updateTriggers: { getPosition: time, getFillColor: [pulse, dark], getRadius: pulse },
         }),
@@ -564,9 +675,10 @@ export default function CorridorMap(props: CorridorMapProps) {
     // Fewer names when zoomed out on a small screen, so they don't pile up.
     const narrow = m.getContainer().clientWidth < 640;
     if (L.warehouses && zoom >= (narrow ? 11.6 : 10.4)) {
+      const pct = makeFmt(live.current.lang).pct;
       for (const w of WAREHOUSES) {
         const [lng, lat] = PLACES[w.place].lnglat;
-        labels.push({ pos: [lng, lat, colH(w.id) + colR * 0.6], text: `${w.name} · ${Math.round((fill.get(w.id) ?? 0) * 100)} %`, size: 12, tone: c.wh });
+        labels.push({ pos: [lng, lat, colH(w.id) + colR * 0.6], text: `${w.name} · ${pct(fill.get(w.id) ?? 0)}`, size: 12, tone: c.wh });
       }
     }
     if (fallback) {
