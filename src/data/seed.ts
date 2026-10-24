@@ -3,11 +3,11 @@
 import { haversine } from "@/lib/geo";
 import { quote, VEHICLE_SPECS } from "@/lib/pricing";
 import { hash, rng } from "@/lib/random";
-import { CARRIERS, ME, VEHICLES } from "./companies";
+import { CARRIERS, ME, VEHICLE, VEHICLES } from "./companies";
 import { route } from "./network";
 import { PLACES, type PlaceId } from "./places";
 import { WAREHOUSES } from "./warehouses";
-import type { Bid, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, VehicleType } from "./types";
+import type { Bid, DockAppt, EcmrState, FeedEvent, GoodsType, Load, LoadStatus, ReturnTrip, Vehicle, VehicleType } from "./types";
 
 export const MIN = 60_000;
 export const HOUR = 60 * MIN;
@@ -70,7 +70,7 @@ const SPECS: Spec[] = [
   S("ZM-4121", "s-agri", "bayonnePort", "zaisa", "agri", "artic", 26, 23_500, "inTransit", 0.65, "c-baltic", "v-br2"),
   S("ZM-4122", "s-paper", "errenteria", "anglet", "paper", "rigid", 10, 6_000, "open", 270),
   S("ZM-4123", "s-parts", "lasarte", "zaisa", "parts", "rigid", 12, 5_200, "booked", 120, "c-txingudi"),
-  S("ZM-4124", "s-sagardoa", "astigarraga", "donostia", "beverages", "van", 3, 1_400, "delivered", 60, "c-urumea", "v-ur2"),
+  S("ZM-4124", "s-sagardoa", "astigarraga", "donostia", "beverages", "van", 3, 1_100, "delivered", 60, "c-urumea", "v-ur2"),
   S("ZM-4125", "s-pharma", "hondarribia", "lezo", "pharma", "reefer", 8, 2_400, "assigned", 210, "c-txingudi", "v-tx4"),
   S("ZM-4126", "s-parts", "zaisa", "hernani", "parts", "artic", 20, 9_000, "open", 420),
   S("ZM-4127", "s-itsaso", "sjdl", "lezo", "frozen", "reefer", 12, 7_000, "open", 240),
@@ -137,13 +137,16 @@ export function buildLoads(t0: number): Load[] {
   });
 }
 
-/** Carriers that can serve a load type (have at least one vehicle for it). */
-export function eligibleCarriers(vehicle: VehicleType) {
-  return CARRIERS.filter((c) => VEHICLES.some((v) => v.carrierId === c.id && CARRIES[v.type].includes(vehicle)));
+/** Can this vehicle take a load of this type and weight? */
+export const canCarry = (v: Pick<Vehicle, "type">, type: VehicleType, kg = 0) => CARRIES[v.type].includes(type) && VEHICLE_SPECS[v.type].kg >= kg;
+
+/** Carriers that can serve a load type and weight (have at least one vehicle for it). */
+export function eligibleCarriers(vehicle: VehicleType, kg = 0) {
+  return CARRIERS.filter((c) => VEHICLES.some((v) => v.carrierId === c.id && canCarry(v, vehicle, kg)));
 }
 
-export function vehicleFor(carrierId: string, type: VehicleType) {
-  return VEHICLES.find((v) => v.carrierId === carrierId && CARRIES[v.type].includes(type));
+export function vehicleFor(carrierId: string, type: VehicleType, kg = 0) {
+  return VEHICLES.find((v) => v.carrierId === carrierId && canCarry(v, type, kg));
 }
 
 let bidSeq = 0;
@@ -154,15 +157,16 @@ export function buildBids(loads: Load[], t0: number): Bid[] {
   for (const l of loads) {
     if (l.status === "cancelled") continue;
     const r = rng(hash(`bids:${l.id}`));
-    const pool = eligibleCarriers(l.vehicle).filter((c) => c.id !== ME.carrierId || l.status !== "open");
+    const pool = eligibleCarriers(l.vehicle, l.kg).filter((c) => c.id !== ME.carrierId || l.status !== "open");
     const n = l.status === "open" ? r.int(1, Math.min(5, pool.length)) : r.int(1, 3);
     const chosen = new Set<string>();
     if (l.carrierId) chosen.add(l.carrierId);
     while (chosen.size < Math.min(pool.length, n + (l.carrierId ? 1 : 0))) chosen.add(r.pick(pool).id);
     for (const cid of chosen) {
-      const v = vehicleFor(cid, l.vehicle);
-      if (!v) continue;
       const accepted = cid === l.carrierId;
+      // The winning bid names the truck that is doing the job.
+      const v = (accepted && l.vehicleId ? VEHICLE.get(l.vehicleId) : undefined) ?? vehicleFor(cid, l.vehicle, l.kg);
+      if (!v) continue;
       bids.push({
         id: `b-${l.id}-${cid}`,
         loadId: l.id,
@@ -188,10 +192,10 @@ export function buildReturns(t0: number): ReturnTrip[] {
   ];
 }
 
-/** Does an open load fit on a return trip? Same direction, close ends, right vehicle, ±6 h. */
+/** Does an open load fit on a return trip? Same direction, close ends, right vehicle (room and payload), ±6 h. */
 export function fitsReturn(l: Load, rt: ReturnTrip, vehicleType: VehicleType): boolean {
   if (l.status !== "open" || rt.status !== "open") return false;
-  if (!CARRIES[vehicleType].includes(l.vehicle)) return false;
+  if (!canCarry({ type: vehicleType }, l.vehicle, l.kg)) return false;
   if (l.pallets > Math.min(rt.freePallets, VEHICLE_SPECS[vehicleType].pallets)) return false;
   const nearFrom = haversine(PLACES[l.from].lnglat, PLACES[rt.from].lnglat) <= 15_000;
   const nearTo = haversine(PLACES[l.to].lnglat, PLACES[rt.to].lnglat) <= 18_000;

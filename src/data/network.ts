@@ -1,8 +1,8 @@
-// A hand-traced road graph of the corridor: the AP-8/A-8 and A-63 motorways,
-// the N-1/GI-636 and D-810 roads and the urban links to every place. Routes
-// are shortest-time paths over it, smoothed so they read as roads. This is a
-// prototype stand-in for a routing engine (OSRM / Valhalla): close at regional
-// zoom, approximate street by street.
+// A hand-traced road graph of the corridor: the GI-20 round the south of
+// Donostia, the AP-8 and A-63 motorways, the N-1/GI-636 and D-810 roads and the
+// urban links to every place. Routes are shortest-time paths over it, smoothed
+// so they read as roads. This is a prototype stand-in for a routing engine
+// (OSRM / Valhalla): close at regional zoom, approximate street by street.
 import { cumulative, smooth, type LngLat } from "@/lib/geo";
 import { PLACES, type PlaceId } from "./places";
 
@@ -59,14 +59,15 @@ interface EdgeSpec {
 const E = (a: NodeId, b: NodeId, road: RoadClass, ref: string, via: LngLat[] = []): EdgeSpec => ({ a, b, road, ref, via });
 
 const EDGES: EdgeSpec[] = [
-  // AP-8 / A-8 through the south of Donostia to the Bidasoa
-  E("j_zubieta", "j_anorga", "motorway", "A-8", [[-2.029, 43.2885]]),
-  E("j_anorga", "j_errekalde", "motorway", "A-8"),
-  E("j_errekalde", "j_amara", "motorway", "A-8", [[-1.9925, 43.2985]]),
-  E("j_amara", "j_martutene", "motorway", "A-8", [[-1.975, 43.297]]),
-  E("j_martutene", "j_intxaurrondo", "motorway", "A-8", [[-1.958, 43.301]]),
-  E("j_intxaurrondo", "j_herrera", "motorway", "A-8", [[-1.942, 43.3075]]),
-  E("j_herrera", "j_errenteria", "motorway", "A-8", [[-1.918, 43.3075]]),
+  // GI-20, the free motorway through the south of Donostia, then the tolled
+  // AP-8 from Errenteria to the Bidasoa
+  E("j_zubieta", "j_anorga", "motorway", "GI-20", [[-2.029, 43.2885]]),
+  E("j_anorga", "j_errekalde", "motorway", "GI-20"),
+  E("j_errekalde", "j_amara", "motorway", "GI-20", [[-1.9925, 43.2985]]),
+  E("j_amara", "j_martutene", "motorway", "GI-20", [[-1.975, 43.297]]),
+  E("j_martutene", "j_intxaurrondo", "motorway", "GI-20", [[-1.958, 43.301]]),
+  E("j_intxaurrondo", "j_herrera", "motorway", "GI-20", [[-1.942, 43.3075]]),
+  E("j_herrera", "j_errenteria", "motorway", "GI-20", [[-1.918, 43.3075]]),
   E("j_errenteria", "j_oiartzun", "motorway", "AP-8", [[-1.885, 43.305]]),
   E("j_oiartzun", "j_ap8_irun_w", "motorway", "AP-8", [[-1.845, 43.311]]),
   E("j_ap8_irun_w", "j_irun_s", "motorway", "AP-8", [[-1.808, 43.326]]),

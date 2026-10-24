@@ -1,7 +1,7 @@
 // The instant price: what a fair spot rate for this lane and vehicle looks
 // like, before any bid. Handling + distance + tolls + border + extras.
 // Calibrated by hand for short-haul Basque corridor work (a demo model, not a
-// tariff): an articulated truck Pasaia → Bayonne lands around €250–280.
+// tariff): an articulated truck Pasaia → Bayonne lands around €225 (a reefer €260).
 import { route, type Route } from "@/data/network";
 import type { PlaceId } from "@/data/places";
 import type { VehicleType } from "@/data/types";
@@ -42,6 +42,7 @@ export interface Quote {
   high: number;
   /** The price on a matching empty return trip. */
   returnPrice: number;
+  /** Whole euros that add up to `fair`. */
   breakdown: { handling: number; distance: number; tolls: number; border: number; extras: number };
   co2Kg: number;
 }
@@ -62,19 +63,16 @@ export function quote(q: QuoteInput, electric = false): Quote {
   if (q.express) extras += subtotal * 0.25;
   subtotal += extras;
   const fair = round5(subtotal);
+  const breakdown = { handling: Math.round(handling), distance: Math.round(distance), tolls: Math.round(tolls), border, extras: Math.round(extras) };
+  // The rounding to €5 goes into handling, so the lines add up to the price shown above them.
+  breakdown.handling += fair - (breakdown.handling + breakdown.distance + breakdown.tolls + breakdown.border + breakdown.extras);
   return {
     route: r,
     low: round5(fair * 0.88),
     fair,
     high: round5(fair * 1.14),
     returnPrice: round5(fair * 0.68),
-    breakdown: {
-      handling: Math.round(handling),
-      distance: Math.round(distance),
-      tolls: Math.round(tolls),
-      border,
-      extras: Math.round(extras),
-    },
+    breakdown,
     co2Kg: Math.round(r.km * (electric ? 0.05 : v.co2) * 10) / 10,
   };
 }
